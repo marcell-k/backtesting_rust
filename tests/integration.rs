@@ -64,6 +64,7 @@ fn take_profit_fills_at_the_limit_price() {
         BrokerConfig {
             cash: 10_000.0,
             commission: Commission::relative(0.0),
+            trade_on_close: false,
             ..Default::default()
         },
     );

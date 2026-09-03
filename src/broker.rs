@@ -441,7 +441,7 @@ impl Broker {
             } else {
                 let prev_close = data.at(Field::Close, -2);
                 let is_contingent = self.order_is_contingent(order_id);
-                let mut p = if self.trade_on_close && !is_contingent {
+                let mut p = if self.trade_on_close && !is_contingent && !prev_close.is_nan() {
                     prev_close
                 } else {
                     open
@@ -631,7 +631,7 @@ impl Broker {
             let margin_available = self.margin_available(data);
             let units = ((margin_available * self.leverage * size_f.abs())
                 / adjusted_price_plus_commission)
-                .round();
+                .floor();
             size_f = if size_f >= 0.0 { units } else { -units };
             if size_f == 0.0 {
                 self.warnings.push(format!(
