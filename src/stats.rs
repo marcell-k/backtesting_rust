@@ -35,7 +35,50 @@ pub struct Stats {
 
     pub sqn: f64,
 }
+use std::fmt;
 
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "  Bars (start..end):      {}..{}",
+            self.start_bar, self.end_bar
+        )?;
+        writeln!(f, "  Exposure Time [%]:      {:.2}", self.exposure_time_pct)?;
+        writeln!(f, "  Equity Final [$]:       {:.2}", self.equity_final)?;
+        writeln!(f, "  Equity Peak [$]:        {:.2}", self.equity_peak)?;
+        writeln!(f, "  Return [%]:             {:.2}", self.return_pct)?;
+        writeln!(
+            f,
+            "  Buy & Hold Return [%]:  {:.2}",
+            self.buy_and_hold_return_pct
+        )?;
+        writeln!(f, "  Return (Ann.) [%]:      {:.2}", self.return_ann_pct)?;
+        writeln!(
+            f,
+            "  Volatility (Ann.) [%]:  {:.2}",
+            self.volatility_ann_pct
+        )?;
+        writeln!(f, "  Sharpe Ratio:           {:.2}", self.sharpe_ratio)?;
+        writeln!(f, "  Sortino Ratio:          {:.2}", self.sortino_ratio)?;
+        writeln!(f, "  Calmar Ratio:           {:.2}", self.calmar_ratio)?;
+        writeln!(f, "  Max. Drawdown [%]:      {:.2}", self.max_drawdown_pct)?;
+        writeln!(f, "  Avg. Drawdown [%]:      {:.2}", self.avg_drawdown_pct)?;
+        writeln!(f, "  # Trades:               {}", self.num_trades)?;
+        writeln!(f, "  Win Rate [%]:           {:.2}", self.win_rate_pct)?;
+        writeln!(f, "  Best Trade [%]:         {:.2}", self.best_trade_pct)?;
+        writeln!(f, "  Worst Trade [%]:        {:.2}", self.worst_trade_pct)?;
+        writeln!(f, "  Avg. Trade [%]:         {:.2}", self.avg_trade_pct)?;
+        writeln!(f, "  Profit Factor:          {:.2}", self.profit_factor)?;
+        writeln!(f, "  Expectancy [%]:         {:.2}", self.expectancy_pct)?;
+        write!(f, "  SQN:                    {:.2}", self.sqn)
+    }
+}
+
+pub fn print_stats(label: &str, stats: &Stats) {
+    println!("== {label} ==");
+    println!("{stats}");
+}
 pub fn compute_stats(
     equity_curve: &[f64],
     closed_trades: &[Trade],
