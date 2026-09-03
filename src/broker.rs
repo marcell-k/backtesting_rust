@@ -505,88 +505,22 @@ impl Broker {
             }
 
             // -- standalone order: opens a new trade --
-            let adjusted_price = self.adjusted_price(order.size, data, Some(price));
-            let commission_per_unit = self.commission.compute(order.size, price) / order.size.abs();
-            let adjusted_price_plus_commission = adjusted_price + commission_per_unit;
+            let opened = self.fill_standalone_order(&order, price, time_index, data)?;
+            if opened && order.sl.is_none() || order.tp.is_none() {
+                let tp_same_bar_safe = stop_price.is_some()
+                    && order.limit.is_none()
+                    && order.tp.is_some()
+                    && (order.is_long()
+                        && order.tp.unwrap() <= high
+                        && order.sl.unwrap_or(f64::NEG_INFINITY) > high);
 
-            let mut size_f = order.size;
-            if -1.0 < size_f && size_f < 1.0 {
-                let margin_available = self.margin_available(data);
-                let units = ((margin_available * self.leverage * size_f.abs())
-                    / adjusted_price_plus_commission)
-                    .floor();
-                size_f = if size_f >= 0.0 { units } else { -units };
-                if size_f == 0.0 {
-                    self.warnings.push(format!("time={}: Broker canceled the relative-sized order due to insufficient margin (equity={:.2}, margin_available={:2}.", self.current_bar, self.equity(data), margin_available));
-                    self.remove_order(order_id);
-                    continue;
-                }
-            }
-            let mut need_size = size_f as i64;
-
-            if !self.hedging {
-                let opposite_trades: Vec<TradeId> = self
-                    .active_trade_ids
-                    .iter()
-                    .copied()
-                    .filter(|&tid| self.trades_by_id[tid].is_long() != order.is_long())
-                    .collect();
-                for trade_id in opposite_trades {
-                    let trade_size = self.trades_by_id[trade_id].size;
-                    if need_size.unsigned_abs() >= trade_size.unsigned_abs() {
-                        self.close_trade(trade_id, price, time_index);
-                        need_size += trade_size;
-                    } else {
-                        self.reduce_trade(trade_id, price, need_size, time_index);
-                        need_size = 0;
-                    }
-                    if need_size == 0 {
-                        break;
-                    }
-                }
-            }
-
-            if need_size.unsigned_abs() as f64 * adjusted_price_plus_commission
-                > self.margin_available(data) * self.leverage
-            {
-                self.warnings.push(format!(
-                    "time={}: Broker canceled the order due to insufficient margin \
-                     (equity={:.2}, margin_available={:.2}).",
-                    self.current_bar,
-                    self.equity(data),
-                    self.margin_available(data)
-                ));
-                self.remove_order(order_id);
-                continue;
-            }
-
-            if need_size != 0 {
-                self.open_trade(
-                    adjusted_price,
-                    need_size,
-                    order.sl,
-                    order.tp,
-                    time_index,
-                    order.tag.clone(),
-                    data,
-                )?;
-
-                if order.sl.is_none() || order.tp.is_none() {
-                    let tp_same_bar_safe = stop_price.is_some()
-                        && order.limit.is_none()
-                        && order.tp.is_some()
-                        && (order.is_long()
-                            && order.tp.unwrap() <= high
-                            && order.sl.unwrap_or(f64::NEG_INFINITY) > high);
-
-                    if is_market_order || tp_same_bar_safe {
-                        reprocess_orders = true;
-                    } else if (low..=high).contains(&order.sl.unwrap_or(f64::NEG_INFINITY))
-                        || (low..=high).contains(&order.tp.unwrap_or(f64::NEG_INFINITY))
-                    {
-                        self.warnings.push("A contingent SL/TP order would execute in the same bar its parent stop/limit order was turned into a trade. Since we can't assert the precise intra-candle price movement, the affected SL/TP order will instead be executed on the next  (matching) price/bar, making the result (of this trade) somewhat dubious.".to_string()
+                if is_market_order || tp_same_bar_safe {
+                    reprocess_orders = true;
+                } else if (low..=high).contains(&order.sl.unwrap_or(f64::NEG_INFINITY))
+                    || (low..=high).contains(&order.tp.unwrap_or(f64::NEG_INFINITY))
+                {
+                    self.warnings.push("A contingent SL/TP order would execute in the same bar its parent stop/limit order was turned into a trade. Since we can't assert the precise intra-candle price movement, the affected SL/TP order will instead be executed on the next  (matching) price/bar, making the result (of this trade) somewhat dubious.".to_string()
                     );
-                    }
                 }
             }
             self.remove_order(order_id);
@@ -634,22 +568,19 @@ impl Broker {
             }
             let new_id = self.next_trade_id;
             self.next_trade_id += 1;
-            self.trades_by_id.insert(
-                new_id,
-                Trade {
-                    id: new_id,
-                    size: -size,
-                    entry_price,
-                    exit_price: None,
-                    entry_bar,
-                    exit_bar: None,
-                    sl_order: None,
-                    tp_order: None,
-                    open_sl: None,
-                    tag,
-                    commission: 0.0,
-                },
-            );
+            self.trades_by_id.push(Trade {
+                id: new_id,
+                size: -size,
+                entry_price,
+                exit_price: None,
+                entry_bar,
+                exit_bar: None,
+                sl_order: None,
+                tp_order: None,
+                open_sl: None,
+                tag,
+                commission: 0.0,
+            });
             self.active_trade_ids.push(new_id);
             new_id
         };
@@ -683,6 +614,107 @@ impl Broker {
         self.closed_trade_ids.push(trade_id);
     }
 
+    fn fill_standalone_order(
+        &mut self,
+        order: &Order,
+        price: f64,
+        time_index: usize,
+        data: &Data,
+    ) -> BtResult<bool> {
+        let adjusted_price = self.adjusted_price(order.size, data, Some(price));
+        let commission_per_unit = self.commission.compute(order.size, price) / order.size.abs();
+        let adjusted_price_plus_commission = adjusted_price + commission_per_unit;
+
+        let mut size_f = order.size;
+        if -1.0 < size_f && size_f < 1.0 {
+            let margin_available = self.margin_available(data);
+            let units = ((margin_available * self.leverage * size_f.abs())
+                / adjusted_price_plus_commission)
+                .floor();
+            size_f = if size_f >= 0.0 { units } else { -units };
+            if size_f == 0.0 {
+                self.warnings.push(format!(
+                    "time={}: Broker canceled the relative-sized order due to \
+                     insufficient margin (equity={:.2}, margin_available={:.2}).",
+                    self.current_bar,
+                    self.equity(data),
+                    margin_available
+                ));
+                return Ok(false);
+            }
+        }
+        let mut need_size = size_f as i64;
+
+        if !self.hedging {
+            let opposite_trades: Vec<TradeId> = self
+                .active_trade_ids
+                .iter()
+                .copied()
+                .filter(|&tid| self.trades_by_id[tid].is_long() != order.is_long())
+                .collect();
+            for trade_id in opposite_trades {
+                let trade_size = self.trades_by_id[trade_id].size;
+                if need_size.unsigned_abs() >= trade_size.unsigned_abs() {
+                    self.close_trade(trade_id, price, time_index);
+                    need_size += trade_size;
+                } else {
+                    self.reduce_trade(trade_id, price, need_size, time_index);
+                    need_size = 0;
+                }
+                if need_size == 0 {
+                    break;
+                }
+            }
+        }
+
+        if need_size.unsigned_abs() as f64 * adjusted_price_plus_commission
+            > self.margin_available(data) * self.leverage
+        {
+            self.warnings.push(format!(
+                "time={}: Broker canceled the order due to insufficient margin \
+                 (equity={:.2}, margin_available={:.2}).",
+                self.current_bar,
+                self.equity(data),
+                self.margin_available(data)
+            ));
+            return Ok(false);
+        }
+
+        if need_size != 0 {
+            self.open_trade(
+                adjusted_price,
+                need_size,
+                order.sl,
+                order.tp,
+                time_index,
+                order.tag.clone(),
+                data,
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn fill_trade_on_close_orders(&mut self, data: &Data, bar_index: usize) -> BtResult<()> {
+        let close = data.at(Field::Close, -1);
+        let candidates: Vec<OrderId> = self
+            .order_queue
+            .iter()
+            .copied()
+            .filter(|&oid| {
+                let o = &self.orders_by_id[&oid];
+                o.limit.is_none() && o.stop.is_none() && o.parent_trade.is_none()
+            })
+            .collect();
+
+        for order_id in candidates {
+            let order = self.orders_by_id[&order_id].clone();
+            self.fill_standalone_order(&order, close, bar_index, data)?;
+            self.remove_order(order_id);
+        }
+        Ok(())
+    }
+
     fn open_trade(
         &mut self,
         price: f64,
@@ -695,22 +727,19 @@ impl Broker {
     ) -> BtResult<TradeId> {
         let id = self.next_trade_id;
         self.next_trade_id += 1;
-        self.trades_by_id.insert(
+        self.trades_by_id.push(Trade {
             id,
-            Trade {
-                id,
-                size,
-                entry_price: price,
-                exit_price: None,
-                entry_bar: time_index,
-                exit_bar: None,
-                sl_order: None,
-                tp_order: None,
-                open_sl: sl,
-                tag,
-                commission: 0.0,
-            },
-        );
+            size,
+            entry_price: price,
+            exit_price: None,
+            entry_bar: time_index,
+            exit_bar: None,
+            sl_order: None,
+            tp_order: None,
+            open_sl: sl,
+            tag,
+            commission: 0.0,
+        });
 
         self.active_trade_ids.push(id);
         self.cash -= self.commission.compute(size as f64, price);
