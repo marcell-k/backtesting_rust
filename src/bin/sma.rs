@@ -1,19 +1,9 @@
-//! Port of the textbook `backtesting.py` "SMA cross" example:
-//! go long when the fast SMA crosses above the slow one, go short (i.e.
-//! flip) when it crosses back below.
-//!
-//! Run with: `cargo run --release --bin sma_cross_demo`
-
 use backtesting::{
-    Backtest, BrokerConfig, Commission, Context, Data, Indicator, OrderSize, Stats, Strategy,
+    Backtest, BrokerConfig, Commission, Context, Data, Indicator, OrderSize, Strategy,
+    stats::print_stats,
 };
-use chrono::{Duration, NaiveDate};
-use rand::rngs::StdRng;
-use rand::{RngExt, SeedableRng};
+use chrono::NaiveDate;
 
-/// Simple moving average of `values` over `window` bars; the first
-/// `window - 1` entries are `NaN`, matching `Strategy.I()`'s warmup
-/// convention in Python.
 fn sma(values: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; values.len()];
     let mut sum = 0.0;
@@ -32,7 +22,7 @@ fn sma(values: &[f64], window: usize) -> Vec<f64> {
 struct SmaCross {
     fast_window: usize,
     slow_window: usize,
-    sma_fast: usize, // indicator handles, filled in by init()
+    sma_fast: usize,
     sma_slow: usize,
 }
 
@@ -72,96 +62,74 @@ impl Strategy for SmaCross {
         let crossed_up = fast_prev <= slow_prev && fast_now > slow_now;
         let crossed_down = fast_prev >= slow_prev && fast_now < slow_now;
 
+        let price = *ctx.data.close().last().unwrap();
+
         if crossed_up {
-            ctx.buy(OrderSize::All, None, None, None, None, None)
-                .unwrap();
+            ctx.buy(
+                OrderSize::Fraction(0.001),
+                None,
+                None,
+                Some(price * 0.99),
+                Some(price * 1.01),
+                None,
+            )
+            .unwrap();
         } else if crossed_down {
-            ctx.sell(OrderSize::All, None, None, None, None, None)
-                .unwrap();
+            ctx.sell(
+                OrderSize::Fraction(0.001),
+                None,
+                None,
+                Some(price * 1.01),
+                Some(price * 0.99),
+                None,
+            )
+            .unwrap();
         }
     }
 }
 
-/// Generates a synthetic daily OHLCV series via geometric random walk, so
-/// the demo has no external data dependency.
-fn synthetic_data(n_days: usize, seed: u64) -> Data {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let start_date = NaiveDate::from_ymd_opt(2020, 1, 1)
-        .unwrap()
-        .and_hms_opt(0, 0, 0)
-        .unwrap();
+fn load_fixture() -> Data {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data.csv");
+    let content = std::fs::read_to_string(path).expect("read data.csv");
 
-    let mut index = Vec::with_capacity(n_days);
-    let mut open = Vec::with_capacity(n_days);
-    let mut high = Vec::with_capacity(n_days);
-    let mut low = Vec::with_capacity(n_days);
-    let mut close = Vec::with_capacity(n_days);
-    let mut volume = Vec::with_capacity(n_days);
+    let mut index = Vec::new();
+    let mut open = Vec::new();
+    let mut high = Vec::new();
+    let mut low = Vec::new();
+    let mut close = Vec::new();
+    let mut volume = Vec::new();
 
-    let mut price = 100.0_f64;
-    for i in 0..n_days {
-        index.push(start_date + Duration::days(i as i64));
-        let day_open = price;
-        let drift = 0.0002;
-        let shock: f64 = rng.random_range(-0.02..0.02);
-        price = (price * (1.0 + drift + shock)).max(0.5);
-        let day_close = price;
-        let day_high = day_open.max(day_close) * (1.0 + rng.random_range(0.0..0.01));
-        let day_low = day_open.min(day_close) * (1.0 - rng.random_range(0.0..0.01));
-
-        open.push(day_open);
-        high.push(day_high);
-        low.push(day_low);
-        close.push(day_close);
-        volume.push(rng.random_range(1_000.0..10_000.0));
+    for line in content.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+        let date = NaiveDate::parse_from_str(parts[0], "%Y-%m-%d").unwrap();
+        index.push(date.and_hms_opt(0, 0, 0).unwrap());
+        open.push(parts[1].parse::<f64>().unwrap());
+        high.push(parts[2].parse::<f64>().unwrap());
+        low.push(parts[3].parse::<f64>().unwrap());
+        close.push(parts[4].parse::<f64>().unwrap());
+        volume.push(parts[5].parse::<f64>().unwrap());
     }
 
     Data::new(index, open, high, low, close, volume)
 }
 
-fn print_stats(label: &str, stats: &Stats) {
-    println!("== {label} ==");
-    println!(
-        "  Bars (start..end):      {}..{}",
-        stats.start_bar, stats.end_bar
-    );
-    println!("  Exposure Time [%]:      {:.2}", stats.exposure_time_pct);
-    println!("  Equity Final [$]:       {:.2}", stats.equity_final);
-    println!("  Equity Peak [$]:        {:.2}", stats.equity_peak);
-    println!("  Return [%]:             {:.2}", stats.return_pct);
-    println!(
-        "  Buy & Hold Return [%]:  {:.2}",
-        stats.buy_and_hold_return_pct
-    );
-    println!("  Return (Ann.) [%]:      {:.2}", stats.return_ann_pct);
-    println!("  Volatility (Ann.) [%]:  {:.2}", stats.volatility_ann_pct);
-    println!("  Sharpe Ratio:           {:.2}", stats.sharpe_ratio);
-    println!("  Sortino Ratio:          {:.2}", stats.sortino_ratio);
-    println!("  Calmar Ratio:           {:.2}", stats.calmar_ratio);
-    println!("  Max. Drawdown [%]:      {:.2}", stats.max_drawdown_pct);
-    println!("  Avg. Drawdown [%]:      {:.2}", stats.avg_drawdown_pct);
-    println!("  # Trades:               {}", stats.num_trades);
-    println!("  Win Rate [%]:           {:.2}", stats.win_rate_pct);
-    println!("  Best Trade [%]:         {:.2}", stats.best_trade_pct);
-    println!("  Worst Trade [%]:        {:.2}", stats.worst_trade_pct);
-    println!("  Avg. Trade [%]:         {:.2}", stats.avg_trade_pct);
-    println!("  Profit Factor:          {:.2}", stats.profit_factor);
-    println!("  Expectancy [%]:         {:.2}", stats.expectancy_pct);
-    println!("  SQN:                    {:.2}", stats.sqn);
-}
-
 fn main() {
-    let data = synthetic_data(1000, 42);
+    let data = load_fixture();
 
     let broker_config = BrokerConfig {
-        cash: 10_000.0,
-        commission: Commission::relative(0.002),
+        cash: 1_000_000.0,
+        commission: Commission::relative(0.0002),
+        exclusive_orders: false,
+        margin: 1.0 / 1000.0,
         ..Default::default()
     };
 
     let bt = Backtest::new(data, broker_config);
 
-    // A single run, like `bt.run()`.
     let result = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
     print_stats("SmaCross(10, 20)", &result.stats);
     if !result.warnings.is_empty() {
@@ -171,16 +139,17 @@ fn main() {
         );
     }
 
-    // A small parallel grid search, like `bt.optimize(fast=..., slow=...)`.
     let mut candidates = Vec::new();
-    for fast in [5, 10, 15, 20] {
-        for slow in [20, 30, 40, 50] {
+    for fast in [5, 10, 15, 20, 50, 100] {
+        for slow in [20, 30, 40, 50, 100, 200] {
             if fast < slow {
                 candidates.push(SmaCross::new(fast, slow));
             }
         }
     }
-    let (best_idx, best) = bt.optimize(candidates, |s| s.sqn).expect("optimize failed");
+    let (best_idx, best) = bt
+        .optimize(candidates, |s| s.sharpe_ratio)
+        .expect("optimize failed");
     println!();
     println!(
         "Best of grid search: SmaCross({}, {}) [candidate #{best_idx}]",

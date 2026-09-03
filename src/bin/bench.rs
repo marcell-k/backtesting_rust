@@ -98,62 +98,41 @@ impl Strategy for SmaCross {
     }
 }
 
-fn parse_date_fast(s: &str) -> NaiveDate {
-    let b = s.as_bytes();
-    assert!(
-        b.len() == 10 && b[4] == b'-' && b[7] == b'-',
-        "expected YYYY-MM-DD, got {s:?}"
-    );
-    let digit = |i: usize| (b[i] - b'0') as i32;
-    let year = digit(0) * 1000 + digit(1) * 100 + digit(2) * 10 + digit(3);
-    let month = (digit(5) * 10 + digit(6)) as u32;
-    let day = (digit(8) * 10 + digit(9)) as u32;
-    NaiveDate::from_ymd_opt(year, month, day).unwrap_or_else(|| panic!("bad date {s:?}"))
-}
+fn load_fixture() -> Data {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data.csv");
+    let content = std::fs::read_to_string(path).expect("read data.csv");
 
-fn load_csv(path: &str) -> Data {
-    let content =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-
-    // Pre-size the columns instead of letting them grow-and-copy repeatedly.
-    let n_rows = content.lines().count().saturating_sub(1);
-    let mut index = Vec::with_capacity(n_rows);
-    let mut open = Vec::with_capacity(n_rows);
-    let mut high = Vec::with_capacity(n_rows);
-    let mut low = Vec::with_capacity(n_rows);
-    let mut close = Vec::with_capacity(n_rows);
-    let mut volume = Vec::with_capacity(n_rows);
+    let mut index = Vec::new();
+    let mut open = Vec::new();
+    let mut high = Vec::new();
+    let mut low = Vec::new();
+    let mut close = Vec::new();
+    let mut volume = Vec::new();
 
     for line in content.lines().skip(1) {
-        let line = line.trim_end();
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let mut fields = line.split(',');
-        let date_str = fields.next().expect("missing date field");
-        let o: f64 = fields.next().expect("missing open").parse().unwrap();
-        let h: f64 = fields.next().expect("missing high").parse().unwrap();
-        let l: f64 = fields.next().expect("missing low").parse().unwrap();
-        let c: f64 = fields.next().expect("missing close").parse().unwrap();
-        let v: f64 = fields.next().expect("missing volume").parse().unwrap();
-
-        index.push(parse_date_fast(date_str).and_hms_opt(0, 0, 0).unwrap());
-        open.push(o);
-        high.push(h);
-        low.push(l);
-        close.push(c);
-        volume.push(v);
+        let parts: Vec<&str> = line.split(',').collect();
+        let date = NaiveDate::parse_from_str(parts[0], "%Y-%m-%d").unwrap();
+        index.push(date.and_hms_opt(0, 0, 0).unwrap());
+        open.push(parts[1].parse::<f64>().unwrap());
+        high.push(parts[2].parse::<f64>().unwrap());
+        low.push(parts[3].parse::<f64>().unwrap());
+        close.push(parts[4].parse::<f64>().unwrap());
+        volume.push(parts[5].parse::<f64>().unwrap());
     }
 
     Data::new(index, open, high, low, close, volume)
 }
+
 fn main() {
-    let path = env::args().nth(1).unwrap_or_else(|| "data.csv".to_string());
-    let data = load_csv(&path);
+    let data = load_fixture();
     let n = data.full_len();
 
     let broker_config = BrokerConfig {
-        cash: 10_000.0,
+        cash: 1_000_000.0,
         commission: Commission::relative(0.00002),
         margin: 1.0 / 1000.0,
         exclusive_orders: false,
