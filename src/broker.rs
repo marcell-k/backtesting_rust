@@ -512,8 +512,9 @@ impl Broker {
             let mut size_f = order.size;
             if -1.0 < size_f && size_f < 1.0 {
                 let margin_available = self.margin_available(data);
-                let units = (margin_available * self.leverage * size_f.abs())
-                    / adjusted_price_plus_commission.floor();
+                let units = ((margin_available * self.leverage * size_f.abs())
+                    / adjusted_price_plus_commission)
+                    .floor();
                 size_f = if size_f >= 0.0 { units } else { -units };
                 if size_f == 0.0 {
                     self.warnings.push(format!("time={}: Broker canceled the relative-sized order due to insufficient margin (equity={:.2}, margin_available={:2}.", self.current_bar, self.equity(data), margin_available));
@@ -521,7 +522,7 @@ impl Broker {
                     continue;
                 }
             }
-            let mut need_size = size_f.round() as i64;
+            let mut need_size = size_f as i64;
 
             if !self.hedging {
                 let opposite_trades: Vec<TradeId> = self
