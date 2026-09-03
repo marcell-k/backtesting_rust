@@ -3,15 +3,15 @@ use backtesting::{
 };
 use chrono::NaiveDate;
 
-const EXPECTED_NUM_TRADES: usize = 534;
-const EXPECTED_EQUITY_FINAL: f64 = 25071.721564705353;
-const EXPECTED_RETURN_PCT: f64 = 150.71721564705354;
-const EXPECTED_WIN_RATE_PCT: f64 = 42.50936329588015;
-const EXPECTED_BEST_TRADE_PCT: f64 = 25.57313680818692;
-const EXPECTED_WORST_TRADE_PCT: f64 = -20.819888469680105;
-const EXPECTED_TRADE_SIZE: i64 = 16;
-const EXPECTED_ENTRY_PRICE: f64 = 298.936773;
-const EXPECTED_EXIT_PRICE: f64 = 333.137385;
+const EXPECTED_NUM_TRADES: usize = 56200;
+const EXPECTED_EQUITY_FINAL: f64 = 72812.55454650347;
+const EXPECTED_RETURN_PCT: f64 = -92.71874454534965;
+const EXPECTED_WIN_RATE_PCT: f64 = 49.53380782918149;
+const EXPECTED_BEST_TRADE_PCT: f64 = 4.452446439590277;
+const EXPECTED_WORST_TRADE_PCT: f64 = -4.023839474418665;
+const EXPECTED_TRADE_SIZE: i64 = 65;
+const EXPECTED_ENTRY_PRICE: f64 = 111.46144;
+const EXPECTED_EXIT_PRICE: f64 = 110.34682559999999;
 const TOL: f64 = 1e-6;
 
 fn assert_close(label: &str, actual: f64, expected: f64) {
@@ -80,24 +80,41 @@ impl Strategy for SmaCross {
         let (fast_now, fast_prev) = (fast[fast.len() - 1], fast[fast.len() - 2]);
         let (slow_now, slow_prev) = (slow[slow.len() - 1], slow[slow.len() - 2]);
 
-        let crossed_up = fast_prev <= slow_prev && fast_now > slow_now;
-        let crossed_down = fast_prev >= slow_prev && fast_now < slow_now;
+        if fast_prev.is_nan() || fast_now.is_nan() || slow_prev.is_nan() || slow_now.is_nan() {
+            return;
+        }
 
+        let crossed_up = fast_prev < slow_prev && fast_now > slow_now;
+        let crossed_down = fast_prev > slow_prev && fast_now < slow_now;
+
+        let price = *ctx.data.close().last().unwrap();
         if crossed_up {
-            ctx.buy(OrderSize::Fraction(0.001), None, None, None, None, None)
-                .unwrap();
+            ctx.buy(
+                OrderSize::Fraction(0.0001),
+                None,
+                None,
+                Some(price * 0.99),
+                Some(price * 1.01),
+                None,
+            )
+            .unwrap();
         } else if crossed_down {
-            ctx.sell(OrderSize::Fraction(0.001), None, None, None, None, None)
-                .unwrap();
+            ctx.sell(
+                OrderSize::Fraction(0.0001),
+                None,
+                None,
+                Some(price * 1.01),
+                Some(price * 0.99),
+                None,
+            )
+            .unwrap();
         }
     }
 }
 
-/// Minimal CSV loader for `tests/fixtures/ohlcv.csv`
-/// (date,open,high,low,close,volume) -- no external crate needed.
 fn load_fixture() -> Data {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ohlcv.csv");
-    let content = std::fs::read_to_string(path).expect("read tests/fixtures/ohlcv.csv");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data.csv");
+    let content = std::fs::read_to_string(path).expect("read data.csv");
 
     let mut index = Vec::new();
     let mut open = Vec::new();
@@ -127,12 +144,12 @@ fn load_fixture() -> Data {
 #[test]
 fn sma_cross_matches_backtesting_py() {
     let data = load_fixture();
-    assert_eq!(data.full_len(), 10000, "fixture should have 10000 bars");
+    assert_eq!(data.full_len(), 1_000_000, "fixture should have 1m bars");
 
     let bt = Backtest::new(
         data,
         BrokerConfig {
-            cash: 10_000.0,
+            cash: 1_000_000.0,
             commission: Commission::relative(0.0002),
             margin: 1.0 / 1000.0,
             trade_on_close: true,
@@ -142,6 +159,7 @@ fn sma_cross_matches_backtesting_py() {
         },
     );
     let result = bt.run(SmaCross::new(10, 20)).unwrap();
+    println!("{:?}", result.stats);
 
     assert_eq!(
         result.stats.num_trades, EXPECTED_NUM_TRADES,

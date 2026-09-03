@@ -10,3 +10,7 @@ rayon = "1.12.0"
 
 [lints.clippy]
 too-many-arguments = "allow"
+
+[profile.profiling]
+inherits = "release"
+debug = true
