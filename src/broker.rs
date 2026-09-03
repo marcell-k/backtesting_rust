@@ -500,7 +500,7 @@ impl Broker {
 
             // -- standalone order: opens a new trade --
             let opened = self.fill_standalone_order(&order, price, time_index, data)?;
-            if opened && (order.sl.is_none() || order.tp.is_none()) {
+            if opened && (order.sl.is_some() || order.tp.is_some()) {
                 let tp_same_bar_safe = stop_price.is_some()
                     && order.limit.is_none()
                     && order.tp.is_some()
@@ -708,10 +708,22 @@ impl Broker {
             })
             .collect();
 
+        let mut opened_with_bracket = false;
         for order_id in candidates {
             let order = self.orders_by_id[&order_id].clone();
-            self.fill_standalone_order(&order, close, bar_index, data)?;
+            let opened = self.fill_standalone_order(&order, close, bar_index, data)?;
+            if opened && (order.sl.is_some() || order.tp.is_some()) {
+                opened_with_bracket = true;
+            }
             self.remove_order(order_id);
+        }
+        // These are always market orders (no limit/stop), so, mirroring the
+        // same-bar reprocessing done in `process_orders`, any SL/TP
+        // contingent orders just attached to a newly opened trade must be
+        // checked against *this* bar's High/Low immediately instead of
+        // waiting for the next bar's `advance()` call.
+        if opened_with_bracket {
+            self.process_orders(data)?;
         }
         Ok(())
     }
