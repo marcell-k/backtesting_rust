@@ -89,7 +89,10 @@ impl Data {
     }
 
     pub fn at(&self, field: Field, offset: isize) -> f64 {
-        let index = (self.curr as isize + offset) as usize;
+        let index = match usize::try_from(self.curr as isize + offset) {
+            Ok(idx) if idx < self.curr => idx,
+            _ => return f64::NAN,
+        };
         match field {
             Field::Open => self.open[index],
             Field::High => self.high[index],

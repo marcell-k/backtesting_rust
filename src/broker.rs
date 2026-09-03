@@ -237,14 +237,8 @@ impl Broker {
 
     fn enqueue_order(&mut self, order: Order) -> OrderId {
         let id = order.id;
-        // ensure SL orders (contingent + stop set) are processed first
-        let front = order.parent_trade.is_some() && order.stop.is_some();
         self.orders_by_id.insert(id, order);
-        if front {
-            self.order_queue.insert(0, id);
-        } else {
-            self.order_queue.push(id);
-        }
+        self.order_queue.push(id);
         id
     }
 
@@ -506,7 +500,7 @@ impl Broker {
 
             // -- standalone order: opens a new trade --
             let opened = self.fill_standalone_order(&order, price, time_index, data)?;
-            if opened && order.sl.is_none() || order.tp.is_none() {
+            if opened && (order.sl.is_none() || order.tp.is_none()) {
                 let tp_same_bar_safe = stop_price.is_some()
                     && order.limit.is_none()
                     && order.tp.is_some()
@@ -548,8 +542,15 @@ impl Broker {
                 t.tp_order,
             )
         };
-        debug_assert!(prev_size * size < 0);
-        debug_assert!(prev_size.unsigned_abs() >= size.unsigned_abs());
+        assert!(
+            prev_size * size < 0,
+            "reduce_trade: size {size} must oppose existing trade size {prev_size}"
+        );
+        assert!(
+            prev_size.unsigned_abs() >= size.unsigned_abs(),
+            "reduce_trade: closing size {size} exceeds trade size {prev_size} \
+             (trade_id={trade_id}) — indicates an upstream sizing/rounding bug"
+        );
         let size_left = prev_size + size;
 
         let close_trade_id = if size_left == 0 {
@@ -630,7 +631,7 @@ impl Broker {
             let margin_available = self.margin_available(data);
             let units = ((margin_available * self.leverage * size_f.abs())
                 / adjusted_price_plus_commission)
-                .floor();
+                .round();
             size_f = if size_f >= 0.0 { units } else { -units };
             if size_f == 0.0 {
                 self.warnings.push(format!(
@@ -751,5 +752,108 @@ impl Broker {
             self.set_trade_sl(data, id, Some(sl_price))?;
         }
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod broker_fix_tests {
+    use super::*;
+    use crate::data::Data;
+    use chrono::NaiveDate;
+
+    fn flat_data(price: f64, n: usize) -> Data {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let index = (0..n)
+            .map(|i| start + chrono::Duration::days(i as i64))
+            .collect();
+        Data::new(
+            index,
+            vec![price; n],
+            vec![price; n],
+            vec![price; n],
+            vec![price; n],
+            vec![1000.0; n],
+        )
+    }
+
+    #[test]
+    fn canceled_order_without_tp_does_not_open_a_trade() {
+        let mut data = flat_data(100.0, 5);
+        let config = BrokerConfig {
+            cash: 100.0,
+            margin: 1.0,
+            ..Default::default()
+        };
+        let mut broker = Broker::new(config, 5).unwrap();
+        data.set_length(2);
+
+        broker
+            .new_order(&data, 1_000_000.0, None, None, None, None, None, None)
+            .unwrap();
+
+        broker.advance(&data, 1).unwrap();
+
+        assert!(
+            broker.trades().is_empty(),
+            "an order that failed margin checks must not open a trade"
+        );
+        assert!(
+            !broker.warnings.is_empty(),
+            "a margin-rejection warning should have been recorded"
+        );
+    }
+
+    #[test]
+    fn new_sl_order_does_not_jump_ahead_of_unrelated_orders() {
+        let data = flat_data(100.0, 3);
+        let config = BrokerConfig {
+            cash: 100_000.0,
+            margin: 1.0,
+            ..Default::default()
+        };
+        let mut broker = Broker::new(config, 3).unwrap();
+
+        let a = broker
+            .new_order(&data, 10.0, None, None, None, None, None, None)
+            .unwrap();
+        let b = broker
+            .new_order(&data, -5.0, None, Some(90.0), None, None, None, Some(0))
+            .unwrap();
+
+        assert_eq!(
+            broker.order_queue,
+            vec![a, b],
+            "orders must stay in insertion (FIFO) order across trades"
+        );
+    }
+
+    #[test]
+    fn fractional_size_rounds_correctly_at_fp_boundary() {
+        let price = 99.999999999999_f64;
+        let mut data = flat_data(price, 2);
+        let config = BrokerConfig {
+            cash: price * 1000.0,
+            margin: 1.0,
+            commission: Commission::relative(0.0),
+            ..Default::default()
+        };
+        let mut broker = Broker::new(config, 2).unwrap();
+        data.set_length(1);
+
+        broker
+            .new_order(&data, 0.999999999, None, None, None, None, None, None)
+            .unwrap();
+        broker.advance(&data, 0).unwrap();
+
+        let trades = broker.trades();
+        assert_eq!(trades.len(), 1, "expected exactly one trade to open");
+        assert!(
+            trades[0].size >= 999,
+            "unit count should not be truncated by fp rounding noise, got {}",
+            trades[0].size
+        );
     }
 }
