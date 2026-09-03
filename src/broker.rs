@@ -48,7 +48,7 @@ pub struct Broker {
     /// matched before other queued orders within the same bar.
     order_queue: Vec<OrderId>,
 
-    trades_by_id: HashMap<TradeId, Trade>,
+    trades_by_id: Vec<Trade>,
     active_trade_ids: Vec<TradeId>,
     closed_trade_ids: Vec<TradeId>,
 
@@ -88,7 +88,7 @@ impl Broker {
             exclusive_orders: config.exclusive_orders,
             orders_by_id: HashMap::new(),
             order_queue: Vec::new(),
-            trades_by_id: HashMap::new(),
+            trades_by_id: Vec::new(),
             active_trade_ids: Vec::new(),
             closed_trade_ids: Vec::new(),
             equity_curve: vec![f64::NAN; n_bars],
@@ -112,13 +112,13 @@ impl Broker {
     pub fn trades(&self) -> Vec<&Trade> {
         self.active_trade_ids
             .iter()
-            .map(|id| &self.trades_by_id[id])
+            .map(|&id| &self.trades_by_id[id])
             .collect()
     }
     pub fn closed_trades(&self) -> Vec<&Trade> {
         self.closed_trade_ids
             .iter()
-            .map(|id| &self.trades_by_id[id])
+            .map(|&id| &self.trades_by_id[id])
             .collect()
     }
     pub fn equity_curve(&self) -> &[f64] {
@@ -146,7 +146,7 @@ impl Broker {
             + self
                 .active_trade_ids
                 .iter()
-                .map(|id| self.trades_by_id[id].pl(last))
+                .map(|&id| self.trades_by_id[id].pl(last))
                 .sum::<f64>()
     }
 
@@ -155,7 +155,7 @@ impl Broker {
         let margin_used: f64 = self
             .active_trade_ids
             .iter()
-            .map(|id| self.trades_by_id[id].value(last) / self.leverage)
+            .map(|&id| self.trades_by_id[id].value(last) / self.leverage)
             .sum();
         (self.equity(data) - margin_used).max(0.0)
     }
@@ -163,7 +163,7 @@ impl Broker {
         self.orders_by_id
             .get(&order_id)
             .and_then(|o| o.parent_trade)
-            .and_then(|tid| self.trades_by_id.get(&tid))
+            .and_then(|tid| self.trades_by_id.get(tid))
             .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
             .unwrap_or(false)
     }
@@ -253,7 +253,7 @@ impl Broker {
         self.order_queue.retain(|&id| id != order_id);
         if let Some(order) = self.orders_by_id.remove(&order_id)
             && let Some(tid) = order.parent_trade
-            && let Some(trade) = self.trades_by_id.get_mut(&tid)
+            && let Some(trade) = self.trades_by_id.get_mut(tid)
         {
             if trade.sl_order == Some(order_id) {
                 trade.sl_order = None;
@@ -272,7 +272,7 @@ impl Broker {
         }
         let trade = self
             .trades_by_id
-            .get(&trade_id)
+            .get(trade_id)
             .ok_or_else(|| BacktestError::Other("unknown trade id".into()))?;
         let mag = 1i64.max((trade.size.unsigned_abs() as f64 * portion).round() as i64);
         let size = if trade.size > 0 { -mag } else { mag };
@@ -327,7 +327,7 @@ impl Broker {
         let existing = {
             let t = self
                 .trades_by_id
-                .get(&trade_id)
+                .get(trade_id)
                 .ok_or_else(|| BacktestError::Other("unknown trade id".into()))?;
             if is_sl { t.sl_order } else { t.tp_order }
         };
@@ -335,8 +335,8 @@ impl Broker {
             self.cancel_order(oid);
         }
         if let Some(p) = price {
-            let trade_size = self.trades_by_id[&trade_id].size;
-            let tag = self.trades_by_id[&trade_id].tag.clone();
+            let trade_size = self.trades_by_id[trade_id].size;
+            let tag = self.trades_by_id[trade_id].tag.clone();
             let (limit, stop) = if is_sl {
                 (None, Some(p))
             } else {
@@ -352,16 +352,16 @@ impl Broker {
                 tag,
                 Some(trade_id),
             )?;
-            let t = self.trades_by_id.get_mut(&trade_id).unwrap();
+            let t = self.trades_by_id.get_mut(trade_id).unwrap();
             if is_sl {
                 t.sl_order = Some(order_id)
             } else {
                 t.tp_order = Some(order_id)
             }
         } else if is_sl {
-            self.trades_by_id.get_mut(&trade_id).unwrap().sl_order = None;
+            self.trades_by_id.get_mut(trade_id).unwrap().sl_order = None;
         } else {
-            self.trades_by_id.get_mut(&trade_id).unwrap().tp_order = None;
+            self.trades_by_id.get_mut(trade_id).unwrap().tp_order = None;
         }
         Ok(())
     }
@@ -467,7 +467,7 @@ impl Broker {
 
             // -- contingent order: closes/reduces on existing trade --
             if let Some(trade_id) = order.parent_trade {
-                let prev_size = match self.trades_by_id.get(&trade_id) {
+                let prev_size = match self.trades_by_id.get(trade_id) {
                     Some(t) => t.size,
                     None => {
                         self.remove_order(order_id);
@@ -485,7 +485,7 @@ impl Broker {
                     // still behaves as a stop order on subsequent bars.
                     if let Some(sp) = stop_price
                         && price == sp
-                        && let Some(trade) = self.trades_by_id.get(&trade_id)
+                        && let Some(trade) = self.trades_by_id.get(trade_id)
                         && let Some(sl_oid) = trade.sl_order
                         && let Some(order) = self.orders_by_id.get_mut(&sl_oid)
                     {
@@ -495,7 +495,7 @@ impl Broker {
 
                 let is_bracket = self
                     .trades_by_id
-                    .get(&trade_id)
+                    .get(trade_id)
                     .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
                     .unwrap_or(false);
                 if !is_bracket {
@@ -529,10 +529,10 @@ impl Broker {
                     .active_trade_ids
                     .iter()
                     .copied()
-                    .filter(|tid| self.trades_by_id[tid].is_long() != order.is_long())
+                    .filter(|&tid| self.trades_by_id[tid].is_long() != order.is_long())
                     .collect();
                 for trade_id in opposite_trades {
-                    let trade_size = self.trades_by_id[&trade_id].size;
+                    let trade_size = self.trades_by_id[trade_id].size;
                     if need_size.unsigned_abs() >= trade_size.unsigned_abs() {
                         self.close_trade(trade_id, price, time_index);
                         need_size += trade_size;
@@ -604,7 +604,7 @@ impl Broker {
 
     fn reduce_trade(&mut self, trade_id: TradeId, price: f64, size: i64, time_index: usize) {
         let (prev_size, entry_price, entry_bar, tag, sl_order, tp_order) = {
-            let t = &self.trades_by_id[&trade_id];
+            let t = &self.trades_by_id[trade_id];
             (
                 t.size,
                 t.entry_price,
@@ -621,7 +621,7 @@ impl Broker {
         let close_trade_id = if size_left == 0 {
             trade_id
         } else {
-            self.trades_by_id.get_mut(&trade_id).unwrap().size = size_left;
+            self.trades_by_id.get_mut(trade_id).unwrap().size = size_left;
             if let Some(oid) = sl_order
                 && let Some(o) = self.orders_by_id.get_mut(&oid)
             {
@@ -660,7 +660,7 @@ impl Broker {
         self.active_trade_ids.retain(|id| *id != trade_id);
 
         let (sl_order, tp_order, size, entry_price) = {
-            let t = &self.trades_by_id[&trade_id];
+            let t = &self.trades_by_id[trade_id];
             (t.sl_order, t.tp_order, t.size, t.entry_price)
         };
         if let Some(oid) = sl_order {
@@ -673,7 +673,7 @@ impl Broker {
         let commission_exit = self.commission.compute(size as f64, price);
         let commission_entry = self.commission.compute(size as f64, entry_price);
 
-        let t = self.trades_by_id.get_mut(&trade_id).unwrap();
+        let t = self.trades_by_id.get_mut(trade_id).unwrap();
         t.exit_price = Some(price);
         t.exit_bar = Some(time_index);
         let pl = t.pl(price);
