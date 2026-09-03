@@ -87,11 +87,6 @@ impl Backtest {
                 bar_index: i,
             };
             strategy.next(&mut ctx);
-
-            // `trade_on_close` orders are fills immediately using current bar
-            if self.broker_config.trade_on_close {
-                broker.fill_trade_on_close_orders(&data, i)?;
-            }
         }
 
         if !ran_out_of_money && self.finalize_trades {

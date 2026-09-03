@@ -231,7 +231,14 @@ impl Broker {
                 self.request_trade_close(tid, 1.0)?;
             }
         }
-        self.enqueue_order(order);
+
+        let is_sl_order = trade.is_some() && stop.is_some();
+        if is_sl_order {
+            self.orders_by_id.insert(id, order);
+            self.order_queue.insert(0, id);
+        } else {
+            self.enqueue_order(order);
+        }
         Ok(id)
     }
 
@@ -694,38 +701,6 @@ impl Broker {
             return Ok(true);
         }
         Ok(false)
-    }
-
-    pub fn fill_trade_on_close_orders(&mut self, data: &Data, bar_index: usize) -> BtResult<()> {
-        let close = data.at(Field::Close, -1);
-        let candidates: Vec<OrderId> = self
-            .order_queue
-            .iter()
-            .copied()
-            .filter(|&oid| {
-                let o = &self.orders_by_id[&oid];
-                o.limit.is_none() && o.stop.is_none() && o.parent_trade.is_none()
-            })
-            .collect();
-
-        let mut opened_with_bracket = false;
-        for order_id in candidates {
-            let order = self.orders_by_id[&order_id].clone();
-            let opened = self.fill_standalone_order(&order, close, bar_index, data)?;
-            if opened && (order.sl.is_some() || order.tp.is_some()) {
-                opened_with_bracket = true;
-            }
-            self.remove_order(order_id);
-        }
-        // These are always market orders (no limit/stop), so, mirroring the
-        // same-bar reprocessing done in `process_orders`, any SL/TP
-        // contingent orders just attached to a newly opened trade must be
-        // checked against *this* bar's High/Low immediately instead of
-        // waiting for the next bar's `advance()` call.
-        if opened_with_bracket {
-            self.process_orders(data)?;
-        }
-        Ok(())
     }
 
     fn open_trade(
