@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use std::sync::Arc;
 
 use crate::{BacktestError, BtResult};
 
@@ -10,26 +11,26 @@ pub enum Field {
     Close,
     Volume,
 }
-type Array = Vec<f64>;
 
 #[derive(Debug, Clone)]
 pub struct Data {
-    pub index: Vec<NaiveDateTime>,
-    open: Array,
-    high: Array,
-    low: Array,
-    close: Array,
-    volume: Array,
+    pub index: Arc<[NaiveDateTime]>,
+    open: Arc<[f64]>,
+    high: Arc<[f64]>,
+    low: Arc<[f64]>,
+    close: Arc<[f64]>,
+    volume: Arc<[f64]>,
     curr: usize,
 }
+
 impl Data {
     pub fn new(
         index: Vec<NaiveDateTime>,
-        open: Array,
-        high: Array,
-        low: Array,
-        close: Array,
-        volume: Array,
+        open: Vec<f64>,
+        high: Vec<f64>,
+        low: Vec<f64>,
+        close: Vec<f64>,
+        volume: Vec<f64>,
     ) -> BtResult<Self> {
         let n = index.len();
         if n == 0 {
@@ -45,12 +46,12 @@ impl Data {
         }
 
         Ok(Self {
-            index,
-            open,
-            high,
-            low,
-            close,
-            volume,
+            index: index.into(),
+            open: open.into(),
+            high: high.into(),
+            low: low.into(),
+            close: close.into(),
+            volume: volume.into(),
             curr: n,
         })
     }
