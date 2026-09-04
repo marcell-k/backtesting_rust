@@ -114,7 +114,7 @@ fn load_fixture() -> Data {
         volume.push(parts[5].parse::<f64>().unwrap());
     }
 
-    Data::new(index, open, high, low, close, volume)
+    Data::new(index, open, high, low, close, volume).unwrap()
 }
 
 fn main() {

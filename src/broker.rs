@@ -780,6 +780,7 @@ mod broker_fix_tests {
             vec![price; n],
             vec![1000.0; n],
         )
+        .unwrap()
     }
 
     #[test]

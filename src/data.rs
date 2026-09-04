@@ -1,5 +1,7 @@
 use chrono::NaiveDateTime;
 
+use crate::{BacktestError, BtResult};
+
 #[derive(Debug, Copy, PartialEq, Eq, Clone)]
 pub enum Field {
     Open,
@@ -28,17 +30,21 @@ impl Data {
         low: Array,
         close: Array,
         volume: Array,
-    ) -> Self {
+    ) -> BtResult<Self> {
         let n = index.len();
-        assert!(n > 0, "data is empty");
-        assert!(
-            [open.len(), high.len(), low.len(), close.len(), volume.len()]
-                .iter()
-                .all(|a| *a == n),
-            "All OHLCV must have the same length"
-        );
+        if n == 0 {
+            return Err(BacktestError::InvalidParameter("data is empty".into()));
+        }
+        if ![open.len(), high.len(), low.len(), close.len(), volume.len()]
+            .iter()
+            .all(|a| *a == n)
+        {
+            return Err(BacktestError::InvalidParameter(
+                "All OHLCV must have the same length".into(),
+            ));
+        }
 
-        Self {
+        Ok(Self {
             index,
             open,
             high,
@@ -46,7 +52,7 @@ impl Data {
             close,
             volume,
             curr: n,
-        }
+        })
     }
 
     pub fn full_len(&self) -> usize {

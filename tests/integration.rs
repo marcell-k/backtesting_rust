@@ -15,7 +15,7 @@ fn bars(rows: &[(f64, f64, f64, f64)]) -> Data {
     let low = rows.iter().map(|r| r.2).collect();
     let close = rows.iter().map(|r| r.3).collect();
     let volume = vec![1000.0; n];
-    Data::new(index, open, high, low, close, volume)
+    Data::new(index, open, high, low, close, volume).unwrap()
 }
 
 /// Buys once (with the given SL/TP) on `buy_at_bar`, then never trades again.

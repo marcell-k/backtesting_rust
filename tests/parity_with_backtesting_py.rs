@@ -21,7 +21,6 @@ fn assert_close(label: &str, actual: f64, expected: f64) {
     );
 }
 
-/// Same warmup convention as `Strategy.I()`: first `window - 1` entries NaN.
 fn sma(values: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; values.len()];
     let mut sum = 0.0;
@@ -37,9 +36,6 @@ fn sma(values: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Identical strategy to `src/bin/sma.rs` and to the Python reference
-/// script's `SmaCross`: go long on a fast/slow SMA cross-up, flip short
-/// on a cross-down.
 struct SmaCross {
     fast_window: usize,
     slow_window: usize,
@@ -138,7 +134,7 @@ fn load_fixture() -> Data {
         volume.push(parts[5].parse::<f64>().unwrap());
     }
 
-    Data::new(index, open, high, low, close, volume)
+    Data::new(index, open, high, low, close, volume).unwrap()
 }
 
 #[test]
