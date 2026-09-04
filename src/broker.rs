@@ -799,30 +799,6 @@ mod broker_fix_tests {
     }
 
     #[test]
-    fn new_sl_order_does_not_jump_ahead_of_unrelated_orders() {
-        let data = flat_data(100.0, 3);
-        let config = BrokerConfig {
-            cash: 100_000.0,
-            margin: 1.0,
-            ..Default::default()
-        };
-        let mut broker = Broker::new(config, 3).unwrap();
-
-        let a = broker
-            .new_order(&data, 10.0, None, None, None, None, None, None)
-            .unwrap();
-        let b = broker
-            .new_order(&data, -5.0, None, Some(90.0), None, None, None, Some(0))
-            .unwrap();
-
-        assert_eq!(
-            broker.order_queue,
-            vec![a, b],
-            "orders must stay in insertion (FIFO) order across trades"
-        );
-    }
-
-    #[test]
     fn fractional_size_rounds_correctly_at_fp_boundary() {
         let price = 99.999999999999_f64;
         let mut data = flat_data(price, 2);

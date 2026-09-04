@@ -7,6 +7,7 @@ edition = "2024"
 chrono = { version = "0.4.45", features = ["std"] }
 rand = "0.10.2"
 rayon = "1.12.0"
+thiserror = "2.0.20"
 
 [lints.clippy]
 too-many-arguments = "allow"
