@@ -1,4 +1,7 @@
-use std::ops::{Index, IndexMut};
+use std::{
+    ops::{Index, IndexMut},
+    sync::Arc,
+};
 
 use crate::Trade;
 
@@ -33,7 +36,7 @@ pub struct Order {
     pub sl: Option<f64>,
     pub tp: Option<f64>,
     pub parent_trade: Option<TradeId>,
-    pub tag: Option<String>,
+    pub tag: Option<Arc<str>>,
 }
 
 impl Order {

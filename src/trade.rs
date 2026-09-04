@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::order::{OrderId, TradeId};
 
 #[derive(Debug, Clone)]
@@ -13,7 +15,7 @@ pub struct Trade {
     pub tp_order: Option<OrderId>,
 
     pub open_sl: Option<f64>,
-    pub tag: Option<String>,
+    pub tag: Option<Arc<str>>,
 
     /// Only finalized after trade is closed, need both leg
     pub commission: f64,

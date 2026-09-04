@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     broker::Broker,
     data::Data,
@@ -77,11 +79,19 @@ impl<'a> Context<'a> {
         stop: Option<f64>,
         sl: Option<f64>,
         tp: Option<f64>,
-        tag: Option<String>,
+        tag: impl Into<Option<String>>,
     ) -> BtResult<OrderId> {
         let size = size.to_signed_size(true)?;
-        self.broker
-            .new_order(self.data, size, limit, stop, sl, tp, tag, None)
+        self.broker.new_order(
+            self.data,
+            size,
+            limit,
+            stop,
+            sl,
+            tp,
+            tag.into().map(Arc::from),
+            None,
+        )
     }
     pub fn sell(
         &mut self,
@@ -90,11 +100,19 @@ impl<'a> Context<'a> {
         stop: Option<f64>,
         sl: Option<f64>,
         tp: Option<f64>,
-        tag: Option<String>,
+        tag: impl Into<Option<String>>,
     ) -> BtResult<OrderId> {
         let size = size.to_signed_size(false)?;
-        self.broker
-            .new_order(self.data, size, limit, stop, sl, tp, tag, None)
+        self.broker.new_order(
+            self.data,
+            size,
+            limit,
+            stop,
+            sl,
+            tp,
+            tag.into().map(Arc::from),
+            None,
+        )
     }
 
     pub fn equity(&self) -> f64 {

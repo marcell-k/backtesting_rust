@@ -1,5 +1,6 @@
 use backtesting::{Backtest, BrokerConfig, Commission, Context, Data, OrderSize, Strategy};
 use chrono::NaiveDate;
+use std::sync::Arc;
 
 fn bars(rows: &[(f64, f64, f64, f64)]) -> Data {
     let start = NaiveDate::from_ymd_opt(2024, 1, 1)
@@ -97,8 +98,6 @@ fn take_profit_fills_at_the_limit_price() {
     assert!(t.is_long());
 }
 
-/// Same setup, but the price dips through the stop instead of rallying
-/// through the limit -- the SL (a stop order) should fill, not the TP.
 #[test]
 fn stop_loss_fills_when_price_dips() {
     let data = bars(&[
@@ -143,8 +142,6 @@ fn stop_loss_fills_when_price_dips() {
     assert!(t.pl(0.0) < 0.0, "a stopped-out long should show a loss");
 }
 
-/// A trade held open to the end of the data should be force-closed by
-/// `finalize_trades` (the default) and show up in `closed_trades`.
 #[test]
 fn open_trade_is_finalized_at_the_end() {
     let data = bars(&[
@@ -178,8 +175,6 @@ fn open_trade_is_finalized_at_the_end() {
     assert!(result.closed_trades[0].exit_price.is_some());
 }
 
-/// An order sized far beyond available margin should be rejected (with a
-/// warning), not silently opened at whatever size fits.
 #[test]
 fn insufficient_margin_rejects_absolute_size_order() {
     struct BuyHugeAbsoluteSize;
@@ -217,5 +212,173 @@ fn insufficient_margin_rejects_absolute_size_order() {
     assert!(
         !result.warnings.is_empty(),
         "a margin-rejection warning should have been recorded"
+    );
+}
+
+#[test]
+fn tag_propagates_from_order_to_trade() {
+    struct BuyOnceWithTag {
+        buy_at_bar: usize,
+        bought: bool,
+    }
+    impl Strategy for BuyOnceWithTag {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == self.buy_at_bar {
+                ctx.buy(
+                    OrderSize::All,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("entry_signal".to_string()),
+                )
+                .unwrap();
+                self.bought = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),
+        (101.0, 102.0, 100.0, 102.0), // buy here
+        (102.0, 103.0, 101.0, 103.0),
+        (103.0, 104.0, 102.0, 104.0),
+        (104.0, 105.0, 103.0, 105.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            ..Default::default()
+        },
+    );
+    let strat = BuyOnceWithTag {
+        buy_at_bar: 2,
+        bought: false,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(result.closed_trades.len(), 1);
+    let t = &result.closed_trades[0];
+    assert_eq!(
+        t.tag.as_deref(),
+        Some("entry_signal"),
+        "tag should survive from order placement through to the closed trade"
+    );
+}
+
+#[test]
+fn no_tag_yields_none() {
+    struct BuyOnceNoTag {
+        buy_at_bar: usize,
+        bought: bool,
+    }
+    impl Strategy for BuyOnceNoTag {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == self.buy_at_bar {
+                ctx.buy(OrderSize::All, None, None, None, None, None)
+                    .unwrap();
+                self.bought = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),
+        (101.0, 102.0, 100.0, 102.0),
+        (102.0, 103.0, 101.0, 103.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            ..Default::default()
+        },
+    );
+    let strat = BuyOnceNoTag {
+        buy_at_bar: 2,
+        bought: false,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(result.closed_trades.len(), 1);
+    assert!(
+        result.closed_trades[0].tag.is_none(),
+        "an order placed without a tag should leave the trade untagged"
+    );
+}
+
+#[test]
+fn tag_survives_partial_close_and_shares_allocation() {
+    struct BuyThenPartialClose {
+        bought: bool,
+        closed_half: bool,
+    }
+    impl Strategy for BuyThenPartialClose {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == 1 {
+                ctx.buy(
+                    OrderSize::Units(10.0),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("swing_long".to_string()),
+                )
+                .unwrap();
+                self.bought = true;
+            } else if self.bought && !self.closed_half && ctx.bar_index() == 3 {
+                ctx.close_position(0.5).unwrap();
+                self.closed_half = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0), // buy here
+        (101.0, 102.0, 100.0, 102.0),
+        (102.0, 103.0, 101.0, 103.0), // close half here
+        (103.0, 104.0, 102.0, 104.0),
+        (104.0, 105.0, 103.0, 105.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            commission: Commission::relative(0.0),
+            ..Default::default()
+        },
+    );
+    let strat = BuyThenPartialClose {
+        bought: false,
+        closed_half: false,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(
+        result.closed_trades.len(),
+        2,
+        "expected the partial close plus the finalized remainder"
+    );
+
+    for t in &result.closed_trades {
+        assert_eq!(
+            t.tag.as_deref(),
+            Some("swing_long"),
+            "tag should propagate to both the closed chunk and the split-off remainder"
+        );
+    }
+
+    let a = result.closed_trades[0].tag.as_ref().unwrap();
+    let b = result.closed_trades[1].tag.as_ref().unwrap();
+    assert!(
+        Arc::ptr_eq(a, b),
+        "tag should be shared via Arc, not re-allocated per trade"
     );
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     commission::Commission,
@@ -178,7 +178,7 @@ impl Broker {
         stop: Option<f64>,
         sl: Option<f64>,
         tp: Option<f64>,
-        tag: Option<String>,
+        tag: Option<Arc<str>>,
         trade: Option<TradeId>,
     ) -> BtResult<OrderId> {
         if size == 0.0 {
@@ -727,7 +727,7 @@ impl Broker {
         sl: Option<f64>,
         tp: Option<f64>,
         time_index: usize,
-        tag: Option<String>,
+        tag: Option<Arc<str>>,
         data: &Data,
     ) -> BtResult<TradeId> {
         let id = self.alloc_trade_id();
