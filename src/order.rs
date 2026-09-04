@@ -1,5 +1,26 @@
-pub type OrderId = usize;
-pub type TradeId = usize;
+use std::ops::{Index, IndexMut};
+
+use crate::Trade;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OrderId(pub(crate) usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TradeId(pub(crate) usize);
+
+impl Index<TradeId> for Vec<Trade> {
+    type Output = Trade;
+
+    fn index(&self, index: TradeId) -> &Trade {
+        &self[index.0]
+    }
+}
+
+impl IndexMut<TradeId> for Vec<Trade> {
+    fn index_mut(&mut self, index: TradeId) -> &mut Self::Output {
+        &mut self[index.0]
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Order {

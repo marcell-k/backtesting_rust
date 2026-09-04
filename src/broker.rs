@@ -92,8 +92,8 @@ impl Broker {
             active_trade_ids: Vec::new(),
             closed_trade_ids: Vec::new(),
             equity_curve: vec![f64::NAN; n_bars],
-            next_order_id: 0,
-            next_trade_id: 0,
+            next_order_id: OrderId(0),
+            next_trade_id: TradeId(0),
             current_bar: 0,
             warnings: Vec::new(),
         })
@@ -159,11 +159,12 @@ impl Broker {
             .sum();
         (self.equity(data) - margin_used).max(0.0)
     }
+
     fn order_is_contingent(&self, order_id: OrderId) -> bool {
         self.orders_by_id
             .get(&order_id)
             .and_then(|o| o.parent_trade)
-            .and_then(|tid| self.trades_by_id.get(tid))
+            .and_then(|tid| self.trades_by_id.get(tid.0))
             .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
             .unwrap_or(false)
     }
@@ -202,8 +203,7 @@ impl Broker {
             )));
         }
 
-        let id = self.next_order_id;
-        self.next_order_id += 1;
+        let id = self.alloc_order_id();
         let order = Order {
             id,
             size,
@@ -242,6 +242,18 @@ impl Broker {
         Ok(id)
     }
 
+    fn alloc_order_id(&mut self) -> OrderId {
+        let id = self.next_order_id;
+        self.next_order_id.0 += 1;
+        id
+    }
+
+    fn alloc_trade_id(&mut self) -> TradeId {
+        let id = self.next_trade_id;
+        self.next_trade_id.0 += 1;
+        id
+    }
+
     fn enqueue_order(&mut self, order: Order) -> OrderId {
         let id = order.id;
         self.orders_by_id.insert(id, order);
@@ -254,7 +266,7 @@ impl Broker {
         self.order_queue.retain(|&id| id != order_id);
         if let Some(order) = self.orders_by_id.remove(&order_id)
             && let Some(tid) = order.parent_trade
-            && let Some(trade) = self.trades_by_id.get_mut(tid)
+            && let Some(trade) = self.trades_by_id.get_mut(tid.0)
         {
             if trade.sl_order == Some(order_id) {
                 trade.sl_order = None;
@@ -273,14 +285,13 @@ impl Broker {
         }
         let trade = self
             .trades_by_id
-            .get(trade_id)
+            .get(trade_id.0)
             .ok_or_else(|| BacktestError::Other("unknown trade id".into()))?;
         let mag = 1i64.max((trade.size.unsigned_abs() as f64 * portion).round() as i64);
         let size = if trade.size > 0 { -mag } else { mag };
         let tag = trade.tag.clone();
 
-        let id = self.next_order_id;
-        self.next_order_id += 1;
+        let id = self.alloc_order_id();
         let order = Order {
             id,
             size: size as f64,
@@ -328,7 +339,7 @@ impl Broker {
         let existing = {
             let t = self
                 .trades_by_id
-                .get(trade_id)
+                .get(trade_id.0)
                 .ok_or_else(|| BacktestError::Other("unknown trade id".into()))?;
             if is_sl { t.sl_order } else { t.tp_order }
         };
@@ -353,16 +364,16 @@ impl Broker {
                 tag,
                 Some(trade_id),
             )?;
-            let t = self.trades_by_id.get_mut(trade_id).unwrap();
+            let t = self.trades_by_id.get_mut(trade_id.0).unwrap();
             if is_sl {
                 t.sl_order = Some(order_id)
             } else {
                 t.tp_order = Some(order_id)
             }
         } else if is_sl {
-            self.trades_by_id.get_mut(trade_id).unwrap().sl_order = None;
+            self.trades_by_id.get_mut(trade_id.0).unwrap().sl_order = None;
         } else {
-            self.trades_by_id.get_mut(trade_id).unwrap().tp_order = None;
+            self.trades_by_id.get_mut(trade_id.0).unwrap().tp_order = None;
         }
         Ok(())
     }
@@ -473,7 +484,7 @@ impl Broker {
 
             // -- contingent order: closes/reduces on existing trade --
             if let Some(trade_id) = order.parent_trade {
-                let prev_size = match self.trades_by_id.get(trade_id) {
+                let prev_size = match self.trades_by_id.get(trade_id.0) {
                     Some(t) => t.size,
                     None => {
                         self.remove_order(order_id);
@@ -491,7 +502,7 @@ impl Broker {
                     // still behaves as a stop order on subsequent bars.
                     if let Some(sp) = stop_price
                         && price == sp
-                        && let Some(trade) = self.trades_by_id.get(trade_id)
+                        && let Some(trade) = self.trades_by_id.get(trade_id.0)
                         && let Some(sl_oid) = trade.sl_order
                         && let Some(order) = self.orders_by_id.get_mut(&sl_oid)
                     {
@@ -501,7 +512,7 @@ impl Broker {
 
                 let is_bracket = self
                     .trades_by_id
-                    .get(trade_id)
+                    .get(trade_id.0)
                     .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
                     .unwrap_or(false);
                 if !is_bracket {
@@ -561,14 +572,15 @@ impl Broker {
         assert!(
             prev_size.unsigned_abs() >= size.unsigned_abs(),
             "reduce_trade: closing size {size} exceeds trade size {prev_size} \
-             (trade_id={trade_id}) — indicates an upstream sizing/rounding bug"
+             (trade_id={}) — indicates an upstream sizing/rounding bug",
+            trade_id.0
         );
         let size_left = prev_size + size;
 
         let close_trade_id = if size_left == 0 {
             trade_id
         } else {
-            self.trades_by_id.get_mut(trade_id).unwrap().size = size_left;
+            self.trades_by_id.get_mut(trade_id.0).unwrap().size = size_left;
             if let Some(oid) = sl_order
                 && let Some(o) = self.orders_by_id.get_mut(&oid)
             {
@@ -579,8 +591,8 @@ impl Broker {
             {
                 o.size = -(size_left as f64);
             }
-            let new_id = self.next_trade_id;
-            self.next_trade_id += 1;
+
+            let new_id = self.alloc_trade_id();
             self.trades_by_id.push(Trade {
                 id: new_id,
                 size: -size,
@@ -617,7 +629,7 @@ impl Broker {
         let commission_exit = self.commission.compute(size as f64, price);
         let commission_entry = self.commission.compute(size as f64, entry_price);
 
-        let t = self.trades_by_id.get_mut(trade_id).unwrap();
+        let t = self.trades_by_id.get_mut(trade_id.0).unwrap();
         t.exit_price = Some(price);
         t.exit_bar = Some(time_index);
         let pl = t.pl(price);
@@ -718,8 +730,7 @@ impl Broker {
         tag: Option<String>,
         data: &Data,
     ) -> BtResult<TradeId> {
-        let id = self.next_trade_id;
-        self.next_trade_id += 1;
+        let id = self.alloc_trade_id();
         self.trades_by_id.push(Trade {
             id,
             size,

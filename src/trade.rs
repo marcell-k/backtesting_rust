@@ -71,7 +71,7 @@ mod test {
     #[test]
     fn test_pl_long_trade() {
         let trade = Trade {
-            id: 0,
+            id: TradeId(0),
             size: 10,
             entry_price: 100.0,
             exit_price: Some(110.0),
@@ -101,7 +101,7 @@ mod test {
     #[test]
     fn test_pl_short_trade() {
         let trade = Trade {
-            id: 1,
+            id: TradeId(1),
             size: -10,
             entry_price: 100.0,
             exit_price: Some(90.0),
