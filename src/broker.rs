@@ -423,6 +423,8 @@ impl Broker {
                 order.stop = None;
                 self.orders_by_id.insert(order_id, order.clone());
             }
+            let is_contingent = self.order_is_contingent(order_id);
+
             // -- determine fill price --
             let price: f64;
             if let Some(limit) = order.limit {
@@ -447,7 +449,6 @@ impl Broker {
                 };
             } else {
                 let prev_close = data.at(Field::Close, -2);
-                let is_contingent = self.order_is_contingent(order_id);
                 let mut p = if self.trade_on_close && !is_contingent && !prev_close.is_nan() {
                     prev_close
                 } else {
@@ -464,7 +465,11 @@ impl Broker {
             }
 
             let is_market_order = order.limit.is_none() && stop_price.is_none();
-            let time_index = self.current_bar;
+            let time_index = if is_market_order && self.trade_on_close && !is_contingent {
+                self.current_bar.saturating_sub(1)
+            } else {
+                self.current_bar
+            };
 
             // -- contingent order: closes/reduces on existing trade --
             if let Some(trade_id) = order.parent_trade {
