@@ -5,7 +5,7 @@ use crate::{
     data::Data,
     error::BtResult,
     indicator::Indicator,
-    order::{Order, OrderId, TradeId},
+    order::{Order, OrderId, OrderSize as ResolvedOrderSize, TradeId},
     position::Position,
     trade::Trade,
 };
@@ -26,16 +26,16 @@ pub enum OrderSize {
 }
 
 impl OrderSize {
-    fn to_signed_size(self, is_buy: bool) -> BtResult<f64> {
-        let magnitude = match self {
-            OrderSize::All => 1.0 - f64::EPSILON,
+    fn to_signed_size(self, is_buy: bool) -> BtResult<ResolvedOrderSize> {
+        let resolved = match self {
+            OrderSize::All => ResolvedOrderSize::Fraction(1.0 - f64::EPSILON),
             OrderSize::Fraction(f) => {
                 if !(0.0 < f && f < 1.0) {
                     return Err(crate::error::BacktestError::InvalidParameter(
                         "size must be a fraction of equity".into(),
                     ));
                 }
-                f
+                ResolvedOrderSize::Fraction(f)
             }
             OrderSize::Units(u) => {
                 if u.round() != u || u < 1.0 {
@@ -43,10 +43,15 @@ impl OrderSize {
                         "size must be a whole positive number".into(),
                     ));
                 }
-                u
+                ResolvedOrderSize::Units(u as i64)
             }
         };
-        Ok(if is_buy { magnitude } else { -magnitude })
+        Ok(match (resolved, is_buy) {
+            (ResolvedOrderSize::Fraction(f), true) => ResolvedOrderSize::Fraction(f),
+            (ResolvedOrderSize::Fraction(f), false) => ResolvedOrderSize::Fraction(-f),
+            (ResolvedOrderSize::Units(u), true) => ResolvedOrderSize::Units(u),
+            (ResolvedOrderSize::Units(u), false) => ResolvedOrderSize::Units(-u),
+        })
     }
 }
 
@@ -159,5 +164,39 @@ impl<'a> Context<'a> {
     /// Sets, replaces, or (with `None`) cancels a trade's take-profit (`Trade.tp` setter).
     pub fn set_trade_tp(&mut self, trade_id: TradeId, price: Option<f64>) -> BtResult<()> {
         self.broker.set_trade_tp(self.data, trade_id, price)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn units_size_of_one_resolves_to_units_variant() {
+        let resolved = OrderSize::Units(1.0).to_signed_size(true).unwrap();
+        assert_eq!(resolved, ResolvedOrderSize::Units(1));
+    }
+
+    #[test]
+    fn fraction_just_below_one_resolves_to_fraction_variant() {
+        let resolved = OrderSize::Fraction(0.999999999)
+            .to_signed_size(true)
+            .unwrap();
+        match resolved {
+            ResolvedOrderSize::Fraction(f) => assert!((f - 0.999999999).abs() < 1e-12),
+            ResolvedOrderSize::Units(_) => panic!("expected Fraction variant, got Units"),
+        }
+    }
+
+    #[test]
+    fn all_resolves_to_fraction_variant_not_units() {
+        let resolved = OrderSize::All.to_signed_size(true).unwrap();
+        assert!(matches!(resolved, ResolvedOrderSize::Fraction(_)));
+    }
+
+    #[test]
+    fn sell_negates_resolved_size() {
+        let resolved = OrderSize::Units(5.0).to_signed_size(false).unwrap();
+        assert_eq!(resolved, ResolvedOrderSize::Units(-5));
     }
 }

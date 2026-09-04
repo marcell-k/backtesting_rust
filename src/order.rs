@@ -25,12 +25,41 @@ impl IndexMut<TradeId> for Vec<Trade> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderSize {
+    /// Signed fraction of equity, magnitude strictly in `(0, 1)`.
+    Fraction(f64),
+    /// Signed, exact number of whole units.
+    Units(i64),
+}
+
+impl OrderSize {
+    pub fn is_long(&self) -> bool {
+        match self {
+            OrderSize::Fraction(f) => *f > 0.0,
+            OrderSize::Units(u) => *u > 0,
+        }
+    }
+
+    pub fn is_short(&self) -> bool {
+        match self {
+            OrderSize::Fraction(f) => *f < 0.0,
+            OrderSize::Units(u) => *u < 0,
+        }
+    }
+
+    pub(crate) fn signed_f64(&self) -> f64 {
+        match self {
+            OrderSize::Fraction(f) => *f,
+            OrderSize::Units(u) => *u as f64,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Order {
     pub id: OrderId,
-    /// positive = long, negative = short
-    /// A magnitude in `(0,1)` is a fraction of equity, else absolute unit.
-    pub size: f64,
+    pub size: OrderSize,
     pub limit: Option<f64>,
     pub stop: Option<f64>,
     pub sl: Option<f64>,
@@ -41,10 +70,10 @@ pub struct Order {
 
 impl Order {
     pub fn is_long(&self) -> bool {
-        self.size > 0.0
+        self.size.is_long()
     }
 
     pub fn is_short(&self) -> bool {
-        self.size < 0.0
+        self.size.is_short()
     }
 }

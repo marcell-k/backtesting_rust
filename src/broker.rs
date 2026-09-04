@@ -4,7 +4,7 @@ use crate::{
     commission::Commission,
     data::{Data, Field},
     error::{BacktestError, BtResult},
-    order::{Order, OrderId, TradeId},
+    order::{Order, OrderId, OrderSize, TradeId},
     position::Position,
     trade::Trade,
 };
@@ -132,12 +132,8 @@ impl Broker {
     pub fn last_price(&self, data: &Data) -> f64 {
         data.at(crate::data::Field::Close, -1)
     }
-    fn adjusted_price(&self, size: f64, data: &Data, price: Option<f64>) -> f64 {
-        let spread = if size >= 0.0 {
-            self.spread
-        } else {
-            -self.spread
-        };
+    fn adjusted_price(&self, is_long: bool, data: &Data, price: Option<f64>) -> f64 {
+        let spread = if is_long { self.spread } else { -self.spread };
         price.unwrap_or_else(|| self.last_price(data)) * (1.0 + spread)
     }
     pub fn equity(&self, data: &Data) -> f64 {
@@ -173,7 +169,7 @@ impl Broker {
     pub fn new_order(
         &mut self,
         data: &Data,
-        size: f64,
+        size: OrderSize,
         limit: Option<f64>,
         stop: Option<f64>,
         sl: Option<f64>,
@@ -181,11 +177,15 @@ impl Broker {
         tag: Option<Arc<str>>,
         trade: Option<TradeId>,
     ) -> BtResult<OrderId> {
-        if size == 0.0 {
+        let is_zero = match size {
+            OrderSize::Fraction(f) => f == 0.0,
+            OrderSize::Units(u) => u == 0,
+        };
+        if is_zero {
             return Err(BacktestError::InvalidOrder("size must be nonzero".into()));
         }
-        let is_long = size > 0.0;
-        let adjusted_price = self.adjusted_price(size, data, None);
+        let is_long = size.is_long();
+        let adjusted_price = self.adjusted_price(is_long, data, None);
         let ref_price = limit.or(stop).unwrap_or(adjusted_price);
         if is_long {
             if !(sl.unwrap_or(f64::NEG_INFINITY) < ref_price
@@ -294,7 +294,7 @@ impl Broker {
         let id = self.alloc_order_id();
         let order = Order {
             id,
-            size: size as f64,
+            size: OrderSize::Units(size),
             limit: None,
             stop: None,
             sl: None,
@@ -356,7 +356,7 @@ impl Broker {
             };
             let order_id = self.new_order(
                 data,
-                -trade_size as f64,
+                OrderSize::Units(-trade_size),
                 limit,
                 stop,
                 None,
@@ -491,8 +491,14 @@ impl Broker {
                         continue;
                     }
                 };
-                let mag = (prev_size.unsigned_abs() as i64).min(order.size.abs().round() as i64);
-                let close_size = if order.size >= 0.0 { mag } else { -mag };
+                let order_units = match order.size {
+                    OrderSize::Units(u) => u,
+                    OrderSize::Fraction(_) => {
+                        unreachable!("contingent (trade-closing) orders are always whole units")
+                    }
+                };
+                let mag = prev_size.unsigned_abs().min(order_units.unsigned_abs()) as i64;
+                let close_size = if order_units >= 0 { mag } else { -mag };
 
                 if self.active_trade_ids.contains(&trade_id) {
                     self.reduce_trade(trade_id, price, close_size, time_index);
@@ -584,12 +590,12 @@ impl Broker {
             if let Some(oid) = sl_order
                 && let Some(o) = self.orders_by_id.get_mut(&oid)
             {
-                o.size = -(size_left as f64);
+                o.size = OrderSize::Units(-size_left);
             }
             if let Some(oid) = tp_order
                 && let Some(o) = self.orders_by_id.get_mut(&oid)
             {
-                o.size = -(size_left as f64);
+                o.size = OrderSize::Units(-size_left);
             }
 
             let new_id = self.alloc_trade_id();
@@ -646,29 +652,32 @@ impl Broker {
         time_index: usize,
         data: &Data,
     ) -> BtResult<bool> {
-        let adjusted_price = self.adjusted_price(order.size, data, Some(price));
-        let commission_per_unit = self.commission.compute(order.size, price) / order.size.abs();
+        let adjusted_price = self.adjusted_price(order.is_long(), data, Some(price));
+        let raw_size = order.size.signed_f64();
+        let commission_per_unit = self.commission.compute(raw_size, price) / raw_size.abs();
         let adjusted_price_plus_commission = adjusted_price + commission_per_unit;
 
-        let mut size_f = order.size;
-        if -1.0 < size_f && size_f < 1.0 {
-            let margin_available = self.margin_available(data);
-            let units = ((margin_available * self.leverage * size_f.abs())
-                / adjusted_price_plus_commission)
-                .floor();
-            size_f = if size_f >= 0.0 { units } else { -units };
-            if size_f == 0.0 {
-                self.warnings.push(format!(
-                    "time={}: Broker canceled the relative-sized order due to \
-                     insufficient margin (equity={:.2}, margin_available={:.2}).",
-                    self.current_bar,
-                    self.equity(data),
-                    margin_available
-                ));
-                return Ok(false);
+        let mut need_size: i64 = match order.size {
+            OrderSize::Units(u) => u,
+            OrderSize::Fraction(f) => {
+                let margin_available = self.margin_available(data);
+                let units = ((margin_available * self.leverage * f.abs())
+                    / adjusted_price_plus_commission)
+                    .floor();
+                let signed_units = if f >= 0.0 { units } else { -units };
+                if signed_units == 0.0 {
+                    self.warnings.push(format!(
+                        "time={}: Broker canceled the relative-sized order due to \
+                         insufficient margin (equity={:.2}, margin_available={:.2}).",
+                        self.current_bar,
+                        self.equity(data),
+                        margin_available
+                    ));
+                    return Ok(false);
+                }
+                signed_units as i64
             }
-        }
-        let mut need_size = size_f as i64;
+        };
 
         if !self.hedging {
             let opposite_trades: Vec<TradeId> = self
@@ -795,7 +804,16 @@ mod broker_fix_tests {
         data.set_length(2);
 
         broker
-            .new_order(&data, 1_000_000.0, None, None, None, None, None, None)
+            .new_order(
+                &data,
+                OrderSize::Units(1_000_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
 
         broker.advance(&data, 1).unwrap();
@@ -824,7 +842,16 @@ mod broker_fix_tests {
         data.set_length(1);
 
         broker
-            .new_order(&data, 0.999999999, None, None, None, None, None, None)
+            .new_order(
+                &data,
+                OrderSize::Fraction(0.999999999),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         broker.advance(&data, 0).unwrap();
 
