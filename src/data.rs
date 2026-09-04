@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{BacktestError, BtResult};
 
-#[derive(Debug, Copy, PartialEq, Eq, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Open,
     High,

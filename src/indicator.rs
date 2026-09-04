@@ -4,16 +4,19 @@ pub struct Indicator {
     pub plot: bool,
     pub overlay: bool,
     pub scatter: bool,
+    warmup_bars: usize,
 }
 
 impl Indicator {
     pub fn new(name: impl Into<String>, values: Vec<f64>) -> Self {
+        let warmup_bars = values.iter().take_while(|x| x.is_nan()).count();
         Self {
             name: name.into(),
             values,
             plot: true,
             overlay: false,
             scatter: false,
+            warmup_bars,
         }
     }
 
@@ -27,8 +30,13 @@ impl Indicator {
         self
     }
 
+    pub fn scatter(mut self, scatter: bool) -> Self {
+        self.scatter = scatter;
+        self
+    }
+
     pub fn warmup_bars(&self) -> usize {
-        self.values.iter().take_while(|x| x.is_nan()).count()
+        self.warmup_bars
     }
 
     pub fn as_of(&self, index: usize) -> &[f64] {

@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub trait Strategy {
-    fn init(&mut self, ctx: &mut Context);
+    fn init(&mut self, _ctx: &mut Context) {}
     fn next(&mut self, ctx: &mut Context);
 }
 
