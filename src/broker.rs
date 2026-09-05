@@ -547,14 +547,18 @@ impl Broker {
                 // -- standalone order: opens a new trade --
                 let opened = self.fill_standalone_order(&order, price, time_index, data)?;
                 if opened && (order.sl.is_some() || order.tp.is_some()) {
-                    let tp_same_bar_safe = stop_price.is_some()
+                    if is_market_order {
+                        reprocess_orders = true;
+                    } else if let Some(tp) = order.tp
+                        && stop_price.is_some()
                         && order.limit.is_none()
-                        && order.tp.is_some()
-                        && (order.is_long()
-                            && order.tp.unwrap() <= high
-                            && order.sl.unwrap_or(f64::NEG_INFINITY) > high);
-
-                    if is_market_order || tp_same_bar_safe {
+                        && ((order.is_long()
+                            && tp <= high
+                            && order.sl.unwrap_or(f64::NEG_INFINITY) < low)
+                            || (order.is_short()
+                                && tp >= low
+                                && order.sl.unwrap_or(f64::INFINITY) > high))
+                    {
                         reprocess_orders = true;
                     } else if (low..=high).contains(&order.sl.unwrap_or(f64::NEG_INFINITY))
                         || (low..=high).contains(&order.tp.unwrap_or(f64::NEG_INFINITY))
