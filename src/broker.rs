@@ -1,10 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     commission::Commission,
     data::{Data, Field},
     error::{BacktestError, BtResult},
-    order::{Order, OrderId, OrderSize, TradeId},
+    order::{Order, OrderId, OrderSize, OrderTable, TradeId},
     position::Position,
     trade::Trade,
 };
@@ -43,10 +43,13 @@ pub struct Broker {
     hedging: bool,
     exclusive_orders: bool,
 
-    orders_by_id: HashMap<OrderId, Order>,
+    orders_by_id: OrderTable,
     /// Prcossening orders for pending orders. SL orders are inserted at the front so they're
     /// matched before other queued orders within the same bar.
     order_queue: Vec<OrderId>,
+    /// Scratch buffer reused every bar for the process_orders() snapshot,
+    /// so we don't heap-allocate a fresh Vec on every single bar.
+    snapshot_buf: Vec<OrderId>,
 
     trades_by_id: Vec<Trade>,
     active_trade_ids: Vec<TradeId>,
@@ -86,8 +89,9 @@ impl Broker {
             trade_on_close: config.trade_on_close,
             hedging: config.hedging,
             exclusive_orders: config.exclusive_orders,
-            orders_by_id: HashMap::new(),
+            orders_by_id: OrderTable::with_capacity(32),
             order_queue: Vec::new(),
+            snapshot_buf: Vec::new(),
             trades_by_id: Vec::new(),
             active_trade_ids: Vec::new(),
             closed_trade_ids: Vec::new(),
@@ -106,7 +110,7 @@ impl Broker {
     pub fn orders(&self) -> Vec<&Order> {
         self.order_queue
             .iter()
-            .map(|id| &self.orders_by_id[id])
+            .map(|&id| &self.orders_by_id[id])
             .collect()
     }
     pub fn trades(&self) -> Vec<&Trade> {
@@ -158,7 +162,7 @@ impl Broker {
 
     fn order_is_contingent(&self, order_id: OrderId) -> bool {
         self.orders_by_id
-            .get(&order_id)
+            .get(order_id)
             .and_then(|o| o.parent_trade)
             .and_then(|tid| self.trades_by_id.get(tid.0))
             .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
@@ -264,7 +268,7 @@ impl Broker {
     /// cancel a pending order
     pub fn cancel_order(&mut self, order_id: OrderId) {
         self.order_queue.retain(|&id| id != order_id);
-        if let Some(order) = self.orders_by_id.remove(&order_id)
+        if let Some(order) = self.orders_by_id.remove(order_id)
             && let Some(tid) = order.parent_trade
             && let Some(trade) = self.trades_by_id.get_mut(tid.0)
         {
@@ -410,14 +414,17 @@ impl Broker {
         let low = data.at(Field::Low, -1);
         let mut reprocess_orders = false;
 
-        let snapshot: Vec<OrderId> = self.order_queue.clone();
-        for order_id in snapshot {
+        let mut snapshot = std::mem::take(&mut self.snapshot_buf);
+        snapshot.clear();
+        snapshot.extend_from_slice(&self.order_queue);
+
+        for &order_id in &snapshot {
             // The related SL/TP sibiling order may have already been removed by a prior iteration
             // of this same loop (e.g. hedged position)
-            if !self.order_queue.contains(&order_id) {
+            if !self.orders_by_id.contains(order_id) {
                 continue;
             }
-            let mut order = self.orders_by_id[&order_id].clone();
+            let mut order = self.orders_by_id[order_id].clone();
 
             // -- stop trigger ? --
             let stop_price = order.stop;
@@ -510,7 +517,7 @@ impl Broker {
                         && price == sp
                         && let Some(trade) = self.trades_by_id.get(trade_id.0)
                         && let Some(sl_oid) = trade.sl_order
-                        && let Some(order) = self.orders_by_id.get_mut(&sl_oid)
+                        && let Some(order) = self.orders_by_id.get_mut(sl_oid)
                     {
                         order.stop = Some(sp);
                     }
@@ -548,6 +555,8 @@ impl Broker {
             }
             self.remove_order(order_id);
         }
+        snapshot.clear();
+        self.snapshot_buf = snapshot;
         if reprocess_orders {
             self.process_orders(data)?;
         }
@@ -556,7 +565,7 @@ impl Broker {
 
     fn remove_order(&mut self, order_id: OrderId) {
         self.order_queue.retain(|id| *id != order_id);
-        self.orders_by_id.remove(&order_id);
+        self.orders_by_id.remove(order_id);
     }
 
     fn reduce_trade(&mut self, trade_id: TradeId, price: f64, size: i64, time_index: usize) {
@@ -588,12 +597,12 @@ impl Broker {
         } else {
             self.trades_by_id.get_mut(trade_id.0).unwrap().size = size_left;
             if let Some(oid) = sl_order
-                && let Some(o) = self.orders_by_id.get_mut(&oid)
+                && let Some(o) = self.orders_by_id.get_mut(oid)
             {
                 o.size = OrderSize::Units(-size_left);
             }
             if let Some(oid) = tp_order
-                && let Some(o) = self.orders_by_id.get_mut(&oid)
+                && let Some(o) = self.orders_by_id.get_mut(oid)
             {
                 o.size = OrderSize::Units(-size_left);
             }

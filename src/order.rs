@@ -77,3 +77,46 @@ impl Order {
         self.size.is_short()
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct OrderTable(Vec<Option<Order>>);
+impl OrderTable {
+    pub fn with_capacity(cap: usize) -> Self {
+        Self(Vec::with_capacity(cap))
+    }
+    pub fn insert(&mut self, id: OrderId, order: Order) {
+        if id.0 >= self.0.len() {
+            self.0.resize_with(id.0 + 1, || None);
+        }
+        self.0[id.0] = Some(order)
+    }
+
+    pub fn remove(&mut self, id: OrderId) -> Option<Order> {
+        self.0.get_mut(id.0).and_then(Option::take)
+    }
+
+    pub fn get(&self, id: OrderId) -> Option<&Order> {
+        self.0.get(id.0).and_then(Option::as_ref)
+    }
+
+    pub fn get_mut(&mut self, id: OrderId) -> Option<&mut Order> {
+        self.0.get_mut(id.0).and_then(Option::as_mut)
+    }
+
+    pub fn contains(&self, id: OrderId) -> bool {
+        self.get(id).is_some()
+    }
+}
+
+impl Index<OrderId> for OrderTable {
+    type Output = Order;
+    fn index(&self, index: OrderId) -> &Self::Output {
+        self.get(index).expect("unknown order id")
+    }
+}
+
+impl IndexMut<OrderId> for OrderTable {
+    fn index_mut(&mut self, index: OrderId) -> &mut Self::Output {
+        self.get_mut(index).expect("unknown order id")
+    }
+}
