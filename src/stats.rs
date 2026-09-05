@@ -79,6 +79,35 @@ pub fn print_stats(label: &str, stats: &Stats) {
     println!("== {label} ==");
     println!("{stats}");
 }
+
+#[derive(Default, Clone, Copy)]
+struct RunningStats {
+    sum: f64,
+    sumsq: f64,
+    n: usize,
+}
+
+impl RunningStats {
+    #[inline]
+    fn push(&mut self, x: f64) {
+        self.sum += x;
+        self.sumsq += x * x;
+        self.n += 1;
+    }
+
+    fn mean_std(&self) -> (f64, f64) {
+        if self.n == 0 {
+            return (0.0, 0.0);
+        }
+        let mean = self.sum / self.n as f64;
+        if self.n < 2 {
+            return (mean, 0.0);
+        }
+        let var = (self.sumsq - self.sum * self.sum / self.n as f64) / (self.n as f64 - 1.0);
+        (mean, var.max(0.0).sqrt())
+    }
+}
+
 pub fn compute_stats(
     equity_curve: &[f64],
     closed_trades: &[Trade],
@@ -90,42 +119,54 @@ pub fn compute_stats(
     let end_bar = n_full.saturating_sub(1);
     let equity_final = *equity_curve.last().unwrap_or(&0.0);
 
-    let equity_peak = equity_curve
-        .iter()
-        .cloned()
-        .fold(f64::MIN, f64::max)
-        .max(equity_final);
-
-    // -- per-bar returns & drawdown --
-    let mut returns = Vec::with_capacity(n_full.saturating_sub(1));
-    for w in equity_curve.windows(2) {
-        if w[0] != 0.0 {
-            returns.push(w[1] / w[0] - 1.0);
-        }
-    }
-
     let mut peak = f64::MIN;
-    let mut drawdowns = Vec::with_capacity(n_full);
+    let mut max_drawdown = 0.0_f64;
+    let mut dd_sum = 0.0_f64;
+    let mut dd_count = 0usize;
     let mut dd_durations = Vec::new();
     let mut cur_dd_len = 0usize;
+
+    let mut returns_stats = RunningStats::default();
+    let mut downside_stats = RunningStats::default();
+
+    let mut prev_eq: Option<f64> = None;
+
     for &eq in equity_curve {
+        // drawdown tracking
         peak = peak.max(eq);
         let dd = if peak > 0.0 { (peak - eq) / peak } else { 0.0 };
-        drawdowns.push(dd);
+        if dd > max_drawdown {
+            max_drawdown = dd;
+        }
         if dd > 0.0 {
+            dd_sum += dd;
+            dd_count += 1;
             cur_dd_len += 1;
         } else if cur_dd_len > 0 {
             dd_durations.push(cur_dd_len);
             cur_dd_len = 0;
         }
+
+        // per-bar return tracking
+        if let Some(p) = prev_eq
+            && p != 0.0
+        {
+            let r = eq / p - 1.0;
+            returns_stats.push(r);
+            if r < 0.0 {
+                downside_stats.push(r);
+            }
+        }
+        prev_eq = Some(eq);
     }
     if cur_dd_len > 0 {
         dd_durations.push(cur_dd_len);
     }
-    let max_drawdown_pct = drawdowns.iter().cloned().fold(0.0_f64, f64::max) * 100.0;
-    let avg_drawdown_pct = if drawdowns.iter().any(|&d| d > 0.0) {
-        let positive: Vec<f64> = drawdowns.iter().cloned().filter(|&d| d > 0.0).collect();
-        mean(&positive) * 100.0
+
+    let equity_peak = peak.max(equity_final);
+    let max_drawdown_pct = max_drawdown * 100.0;
+    let avg_drawdown_pct = if dd_count > 0 {
+        dd_sum / dd_count as f64 * 100.0
     } else {
         0.0
     };
@@ -135,6 +176,9 @@ pub fn compute_stats(
     } else {
         dd_durations.iter().sum::<usize>() as f64 / dd_durations.len() as f64
     };
+
+    let (mean_r, std_r) = returns_stats.mean_std();
+    let (_, std_downside) = downside_stats.mean_std();
 
     let cash0 = equity_curve.first().copied().unwrap_or(equity_final);
     let return_pct = if cash0 != 0.0 {
@@ -162,29 +206,20 @@ pub fn compute_stats(
         0.0
     };
     let volatility_ann_pct = if periods_per_year > 0.0 {
-        std_dev(&returns) * periods_per_year.sqrt() * 100.0
+        std_r * periods_per_year.sqrt() * 100.0
     } else {
         0.0
     };
 
-    let sharpe_ratio = {
-        let m = mean(&returns);
-        let s = std_dev(&returns);
-        if s > 0.0 && periods_per_year > 0.0 {
-            m / s * periods_per_year.sqrt()
-        } else {
-            0.0
-        }
+    let sharpe_ratio = if std_r > 0.0 && periods_per_year > 0.0 {
+        mean_r / std_r * periods_per_year.sqrt()
+    } else {
+        0.0
     };
-    let sortino_ratio = {
-        let m = mean(&returns);
-        let downside: Vec<f64> = returns.iter().cloned().filter(|&r| r < 0.0).collect();
-        let ds = std_dev(&downside);
-        if ds > 0.0 && periods_per_year > 0.0 {
-            m / ds * periods_per_year.sqrt()
-        } else {
-            0.0
-        }
+    let sortino_ratio = if std_downside > 0.0 && periods_per_year > 0.0 {
+        mean_r / std_downside * periods_per_year.sqrt()
+    } else {
+        0.0
     };
     let calmar_ratio = if max_drawdown_pct > 0.0 {
         return_ann_pct / max_drawdown_pct
@@ -251,9 +286,6 @@ pub fn compute_stats(
 
     let window_len = end_bar.saturating_sub(start_bar) + 1;
     let exposure_time_pct = if window_len > 0 {
-        // Fraction of bars (within the post-warmup tradable window) during
-        // which at least one trade was open. Approximated from trade
-        // entry/exit bar indices.
         let mut open_bars = vec![false; window_len];
         for t in closed_trades {
             let entry = t.entry_bar.saturating_sub(start_bar).min(window_len - 1);
