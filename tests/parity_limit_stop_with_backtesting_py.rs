@@ -2,16 +2,21 @@ use backtesting::{
     Backtest, BrokerConfig, Commission, Context, Data, Indicator, OrderSize, Strategy,
 };
 use chrono::NaiveDate;
+use std::io::Write;
 
-const EXPECTED_NUM_TRADES: usize = 56200;
-const EXPECTED_EQUITY_FINAL: f64 = 72812.55454650347;
-const EXPECTED_RETURN_PCT: f64 = -92.71874454534965;
-const EXPECTED_WIN_RATE_PCT: f64 = 49.53380782918149;
-const EXPECTED_BEST_TRADE_PCT: f64 = 4.452446439590277;
-const EXPECTED_WORST_TRADE_PCT: f64 = -4.023839474418665;
-const EXPECTED_TRADE_SIZE: i64 = 65;
-const EXPECTED_ENTRY_PRICE: f64 = 111.46144;
-const EXPECTED_EXIT_PRICE: f64 = 110.34682559999999;
+// NOTE: fill these in after running `uv run tests/ref_limit_stop.py`
+// (from inside `tests/`, so its relative `../data.csv` resolves) and
+// copying the printed JSON values below.
+const EXPECTED_NUM_TRADES: usize = 56371;
+const EXPECTED_EQUITY_FINAL: f64 = 160849995.5777802;
+const EXPECTED_RETURN_PCT: f64 = 15984.99955777802;
+const EXPECTED_WIN_RATE_PCT: f64 = 39.73674407053272;
+const EXPECTED_BEST_TRADE_PCT: f64 = 5.069893596011739;
+const EXPECTED_WORST_TRADE_PCT: f64 = -4.11973973468397;
+const EXPECTED_TRADE_SIZE: i64 = -147144;
+const EXPECTED_ENTRY_PRICE: f64 = 109.38797;
+const EXPECTED_EXIT_PRICE: f64 = 110.29915585;
+const EXPECTED_TAG: &str = "short_limit_entry";
 const TOL: f64 = 1e-6;
 
 fn assert_close(label: &str, actual: f64, expected: f64) {
@@ -36,14 +41,14 @@ fn sma(values: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-struct SmaCross {
+struct SmaCrossLimitStop {
     fast_window: usize,
     slow_window: usize,
     sma_fast: usize,
     sma_slow: usize,
 }
 
-impl SmaCross {
+impl SmaCrossLimitStop {
     fn new(fast_window: usize, slow_window: usize) -> Self {
         Self {
             fast_window,
@@ -54,7 +59,7 @@ impl SmaCross {
     }
 }
 
-impl Strategy for SmaCross {
+impl Strategy for SmaCrossLimitStop {
     fn init(&mut self, ctx: &mut Context) {
         let close = ctx.data.full_close();
         self.sma_fast = ctx.indicator(Indicator::new(
@@ -85,23 +90,25 @@ impl Strategy for SmaCross {
 
         let price = *ctx.data.close().last().unwrap();
         if crossed_up {
+            // breakout entry: buy STOP above current price
             ctx.buy(
                 OrderSize::Fraction(0.0001),
                 None,
-                None,
+                Some(price * 1.001),
                 Some(price * 0.99),
-                Some(price * 1.01),
-                None,
+                Some(price * 1.02),
+                Some("long_stop_entry".to_string()),
             )
             .unwrap();
         } else if crossed_down {
+            // pullback entry: sell LIMIT above current price
             ctx.sell(
                 OrderSize::Fraction(0.0001),
-                None,
+                Some(price * 1.001),
                 None,
                 Some(price * 1.01),
-                Some(price * 0.99),
-                None,
+                Some(price * 0.98),
+                Some("short_limit_entry".to_string()),
             )
             .unwrap();
         }
@@ -138,7 +145,7 @@ fn load_fixture() -> Data {
 }
 
 #[test]
-fn sma_cross_matches_backtesting_py() {
+fn sma_cross_limit_stop_matches_backtesting_py() {
     let data = load_fixture();
     assert_eq!(data.full_len(), 1_000_000, "fixture should have 1m bars");
 
@@ -154,25 +161,28 @@ fn sma_cross_matches_backtesting_py() {
             ..Default::default()
         },
     );
-    let result = bt.run(SmaCross::new(10, 20)).unwrap();
+    let result = bt.run(SmaCrossLimitStop::new(10, 20)).unwrap();
     println!("{:?}", result.stats);
+    if std::env::var("DUMP_TRADES").is_ok() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/trades_rs.csv");
+        let mut f = std::fs::File::create(path).unwrap();
+        writeln!(f, "size,entry_bar,exit_bar,entry_price,exit_price,tag").unwrap();
+        for t in &result.closed_trades {
+            writeln!(
+                f,
+                "{},{},{},{},{},{}",
+                t.size,
+                t.entry_bar,
+                t.exit_bar.map(|b| b as i64).unwrap_or(-1),
+                t.entry_price,
+                t.exit_price.unwrap_or(f64::NAN),
+                t.tag.as_deref().unwrap_or(""),
+            )
+            .unwrap();
+        }
+        eprintln!("wrote {} trades to {}", result.closed_trades.len(), path);
+    }
 
-    // use std::io::Write;
-    // let mut f =
-    //     std::fs::File::create(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rs_trades.csv")).unwrap();
-    // writeln!(f, "Size,EntryBar,ExitBar,EntryPrice,ExitPrice").unwrap();
-    // for t in &result.closed_trades {
-    //     writeln!(
-    //         f,
-    //         "{},{},{},{},{}",
-    //         t.size,
-    //         t.entry_bar,
-    //         t.exit_bar.unwrap_or(0),
-    //         t.entry_price,
-    //         t.exit_price.unwrap_or(0.0)
-    //     )
-    //     .unwrap();
-    // }
     assert_eq!(
         result.stats.num_trades, EXPECTED_NUM_TRADES,
         "trade count diverged from backtesting.py"
@@ -209,5 +219,10 @@ fn sma_cross_matches_backtesting_py() {
         "exit_price",
         t.exit_price.expect("trade should be closed"),
         EXPECTED_EXIT_PRICE,
+    );
+    assert_eq!(
+        t.tag.as_deref(),
+        Some(EXPECTED_TAG),
+        "tag diverged from backtesting.py"
     );
 }

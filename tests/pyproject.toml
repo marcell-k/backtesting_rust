@@ -3,14 +3,9 @@ name = "tests"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-authors = [
-    { name = "Kele98-star", email = "kele.marcell.mail@gmail.com" }
-]
+authors = [{ name = "Kele98-star", email = "kele.marcell.mail@gmail.com" }]
 requires-python = ">=3.14"
-dependencies = [
-    "backtesting>=0.6.6",
-    "pandas>=3.0.5",
-]
+dependencies = ["backtesting>=0.6.6", "pandas>=3.0.5"]
 
 [project.scripts]
 tests = "tests:main"
@@ -18,3 +13,6 @@ tests = "tests:main"
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+package = false

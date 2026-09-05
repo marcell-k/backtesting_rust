@@ -140,8 +140,11 @@ fn main() {
     };
 
     let bt = Backtest::new(data, broker_config);
-    let result = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
+    for _ in 0..100 {
+        let _ = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
+    }
 
+    let result = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
     println!(
         "bars={n} trades={} equity_final={:.2} return_pct={:.2}",
         result.stats.num_trades, result.stats.equity_final, result.stats.return_pct
