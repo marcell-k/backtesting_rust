@@ -230,58 +230,67 @@ pub fn compute_stats(
     // -- trade-level stats --
     let num_trades = closed_trades.len();
     let last_price = close.last().copied().unwrap_or(0.0);
-    let trade_pl_pcts: Vec<f64> = closed_trades
-        .iter()
-        .map(|t| t.pl_pct(last_price) * 100.0)
-        .collect();
-    let trade_pls: Vec<f64> = closed_trades.iter().map(|t| t.pl(last_price)).collect();
-    let trade_durations: Vec<usize> = closed_trades
-        .iter()
-        .map(|t| {
-            t.exit_bar
-                .unwrap_or(t.entry_bar)
-                .saturating_sub(t.entry_bar)
-        })
-        .collect();
+    let mut win_count = 0usize;
+    let mut sum_pct = 0.0_f64;
+    let mut best_trade_pct = f64::MIN;
+    let mut worst_trade_pct = f64::MAX;
+    let mut max_trade_duration_bars = 0usize;
+    let mut sum_duration = 0usize;
+    let mut gross_profit = 0.0_f64;
+    let mut gross_loss = 0.0_f64;
+    let mut pl_stats = RunningStats::default();
+
+    for t in closed_trades {
+        let pl = t.pl(last_price);
+        let pct = t.pl_pct(last_price) * 100.0;
+        let duration = t
+            .exit_bar
+            .unwrap_or(t.entry_bar)
+            .saturating_sub(t.entry_bar);
+
+        if pl > 0.0 {
+            win_count += 1;
+            gross_profit += pl;
+        } else if pl < 0.0 {
+            gross_loss -= pl;
+        }
+
+        sum_pct += pct;
+        best_trade_pct = best_trade_pct.max(pct);
+        worst_trade_pct = worst_trade_pct.min(pct);
+
+        max_trade_duration_bars = max_trade_duration_bars.max(duration);
+        sum_duration += duration;
+
+        pl_stats.push(pl);
+    }
 
     let win_rate_pct = if num_trades > 0 {
-        trade_pls.iter().filter(|&&pl| pl > 0.0).count() as f64 / num_trades as f64 * 100.0
+        win_count as f64 / num_trades as f64 * 100.0
     } else {
         0.0
     };
-    let best_trade_pct = trade_pl_pcts.iter().cloned().fold(f64::MIN, f64::max);
-    let worst_trade_pct = trade_pl_pcts.iter().cloned().fold(f64::MAX, f64::min);
-    let avg_trade_pct = mean(&trade_pl_pcts);
-    let max_trade_duration_bars = trade_durations.iter().copied().max().unwrap_or(0);
-    let avg_trade_duration_bars = if trade_durations.is_empty() {
-        0.0
+    let avg_trade_pct = if num_trades > 0 {
+        sum_pct / num_trades as f64
     } else {
-        trade_durations.iter().sum::<usize>() as f64 / trade_durations.len() as f64
+        0.0
     };
-
-    let gross_profit: f64 = trade_pls.iter().cloned().filter(|&pl| pl > 0.0).sum();
-    let gross_loss: f64 = trade_pls
-        .iter()
-        .cloned()
-        .filter(|&pl| pl < 0.0)
-        .sum::<f64>()
-        .abs();
+    let avg_trade_duration_bars = if num_trades > 0 {
+        sum_duration as f64 / num_trades as f64
+    } else {
+        0.0
+    };
     let profit_factor = if gross_loss > 0.0 {
         gross_profit / gross_loss
     } else {
         f64::INFINITY
     };
-
     let expectancy_pct = avg_trade_pct;
-
-    let sqn = {
-        let m = mean(&trade_pls);
-        let s = std_dev(&trade_pls);
-        if s > 0.0 && num_trades > 0 {
-            m / s * (num_trades as f64).sqrt()
-        } else {
-            0.0
-        }
+    let (mean_pl, std_pl) = pl_stats.mean_std();
+    let sqn = if std_pl > 0.0 && num_trades > 0 {
+        mean_pl / std_pl * (num_trades as f64).sqrt()
+    } else {
+        0.0
     };
 
     let window_len = end_bar.saturating_sub(start_bar) + 1;
@@ -340,21 +349,4 @@ pub fn compute_stats(
         expectancy_pct,
         sqn,
     }
-}
-
-fn mean(xs: &[f64]) -> f64 {
-    if xs.is_empty() {
-        0.0
-    } else {
-        xs.iter().sum::<f64>() / xs.len() as f64
-    }
-}
-
-fn std_dev(xs: &[f64]) -> f64 {
-    if xs.len() < 2 {
-        return 0.0;
-    }
-    let m = mean(xs);
-    let var = xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (xs.len() as f64 - 1.0);
-    var.sqrt()
 }
