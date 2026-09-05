@@ -15,3 +15,7 @@ too-many-arguments = "allow"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[profile.release]
+lto = true
+codegen-units = 1
