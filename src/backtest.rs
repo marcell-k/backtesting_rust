@@ -90,7 +90,7 @@ impl Backtest {
         }
 
         if !ran_out_of_money && self.finalize_trades {
-            let ids: Vec<_> = broker.trades().iter().rev().map(|t| t.id).collect();
+            let ids: Vec<_> = broker.trades().rev().map(|t| t.id).collect();
             for tid in ids {
                 broker.request_trade_close(tid, 1.0)?;
             }

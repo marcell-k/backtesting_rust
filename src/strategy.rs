@@ -129,20 +129,20 @@ impl<'a> Context<'a> {
     }
 
     pub fn orders(&self) -> Vec<Order> {
-        self.broker.orders().into_iter().cloned().collect()
+        self.broker.orders().cloned().collect()
     }
 
     pub fn trades(&self) -> Vec<Trade> {
-        self.broker.trades().into_iter().cloned().collect()
+        self.broker.trades().cloned().collect()
     }
 
     pub fn closed_trades(&self) -> Vec<Trade> {
-        self.broker.closed_trades().into_iter().cloned().collect()
+        self.broker.closed_trades().cloned().collect()
     }
 
     /// Close `portion` of the current net position (`Position.close()`)
     pub fn close_position(&mut self, portion: f64) -> BtResult<()> {
-        let trade_ids: Vec<TradeId> = self.broker.trades().iter().map(|t| t.id).collect();
+        let trade_ids: Vec<TradeId> = self.broker.trades().map(|t| t.id).collect();
         for tid in trade_ids {
             self.broker.request_trade_close(tid, portion)?;
         }

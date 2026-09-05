@@ -107,23 +107,20 @@ impl Broker {
     pub fn cash(&self) -> f64 {
         self.cash
     }
-    pub fn orders(&self) -> Vec<&Order> {
+    pub fn orders(&self) -> impl Iterator<Item = &Order> + '_ {
         self.order_queue
             .iter()
-            .map(|&id| &self.orders_by_id[id])
-            .collect()
+            .map(move |&id| &self.orders_by_id[id])
     }
-    pub fn trades(&self) -> Vec<&Trade> {
+    pub fn trades(&self) -> impl DoubleEndedIterator<Item = &Trade> + '_ {
         self.active_trade_ids
             .iter()
-            .map(|&id| &self.trades_by_id[id])
-            .collect()
+            .map(move |&id| &self.trades_by_id[id])
     }
-    pub fn closed_trades(&self) -> Vec<&Trade> {
+    pub fn closed_trades(&self) -> impl Iterator<Item = &Trade> + '_ {
         self.closed_trade_ids
             .iter()
-            .map(|&id| &self.trades_by_id[id])
-            .collect()
+            .map(move |&id| &self.trades_by_id[id])
     }
     pub fn take_closed_trades(&mut self) -> Vec<Trade> {
         let closed_ids: std::collections::HashSet<usize> =
@@ -143,8 +140,7 @@ impl Broker {
     }
     pub fn position(&self, data: &Data) -> Position {
         let last_price = self.last_price(data);
-        let trades = self.trades();
-        Position::from_trades(trades, last_price)
+        Position::from_trades(self.trades(), last_price)
     }
     pub fn last_price(&self, data: &Data) -> f64 {
         data.at(crate::data::Field::Close, -1)
@@ -843,7 +839,7 @@ mod broker_fix_tests {
         broker.advance(&data, 1).unwrap();
 
         assert!(
-            broker.trades().is_empty(),
+            broker.trades().next().is_none(),
             "an order that failed margin checks must not open a trade"
         );
         assert!(
@@ -879,7 +875,7 @@ mod broker_fix_tests {
             .unwrap();
         broker.advance(&data, 0).unwrap();
 
-        let trades = broker.trades();
+        let trades: Vec<_> = broker.trades().collect();
         assert_eq!(trades.len(), 1, "expected exactly one trade to open");
         assert!(
             trades[0].size >= 999,
