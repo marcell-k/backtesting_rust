@@ -123,13 +123,14 @@ impl Broker {
             .map(move |&id| &self.trades_by_id[id])
     }
     pub fn take_closed_trades(&mut self) -> Vec<Trade> {
-        let closed_ids: std::collections::HashSet<usize> =
-            self.closed_trade_ids.iter().map(|id| id.0).collect();
         let all = std::mem::take(&mut self.trades_by_id);
+        let mut is_closed = vec![false; all.len()];
+        for id in &self.closed_trade_ids {
+            is_closed[id.0] = true;
+        }
         all.into_iter()
-            .enumerate()
-            .filter(|(i, _)| closed_ids.contains(i))
-            .map(|(_, t)| t)
+            .zip(is_closed)
+            .filter_map(|(t, closed)| closed.then_some(t))
             .collect()
     }
     pub fn equity_curve(&self) -> &[f64] {
@@ -434,12 +435,11 @@ impl Broker {
                 if !self.orders_by_id.contains(order_id) {
                     continue;
                 }
-                let mut order = self.orders_by_id[order_id].clone();
 
                 // -- stop trigger ? --
-                let stop_price = order.stop;
+                let stop_price = self.orders_by_id[order_id].stop;
                 if let Some(sp) = stop_price {
-                    let is_stop_hit = if order.is_long() {
+                    let is_stop_hit = if self.orders_by_id[order_id].is_long() {
                         high >= sp
                     } else {
                         low <= sp
@@ -448,9 +448,9 @@ impl Broker {
                         continue;
                     }
                     // A triggered stop order becomes a market/limit order
-                    order.stop = None;
-                    self.orders_by_id.insert(order_id, order.clone());
+                    self.orders_by_id.get_mut(order_id).unwrap().stop = None;
                 }
+                let order = self.orders_by_id[order_id].clone();
                 let is_contingent = self.order_is_contingent(order_id);
 
                 // -- determine fill price --
