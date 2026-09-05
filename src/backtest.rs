@@ -103,8 +103,9 @@ impl Backtest {
 
         data.set_length(full_len);
 
-        let equity_curve = backfill(broker.equity_curve(), broker.cash());
-        let closed_trades: Vec<Trade> = broker.closed_trades().into_iter().cloned().collect();
+        let cash = broker.cash();
+        let equity_curve = backfill(broker.take_equity_curve(), cash);
+        let closed_trades = broker.take_closed_trades();
         let stats = compute_stats(
             &equity_curve,
             &closed_trades,
@@ -118,7 +119,7 @@ impl Backtest {
             stats,
             closed_trades,
             equity_curve,
-            warnings: broker.warnings.clone(),
+            warnings: std::mem::take(&mut broker.warnings),
         })
     }
 
@@ -151,15 +152,14 @@ impl Backtest {
     }
 }
 
-fn backfill(equity: &[f64], cash: f64) -> Vec<f64> {
-    let mut out = equity.to_vec();
+pub fn backfill(mut equity: Vec<f64>, cash: f64) -> Vec<f64> {
     let mut next_valid: Option<f64> = None;
-    for v in out.iter_mut().rev() {
+    for v in equity.iter_mut().rev() {
         if v.is_nan() {
             *v = next_valid.unwrap_or(cash);
         } else {
             next_valid = Some(*v);
         }
     }
-    out
+    equity
 }

@@ -89,7 +89,7 @@ impl Broker {
             trade_on_close: config.trade_on_close,
             hedging: config.hedging,
             exclusive_orders: config.exclusive_orders,
-            orders_by_id: OrderTable::with_capacity(32),
+            orders_by_id: OrderTable::with_capacity(n_bars),
             order_queue: Vec::new(),
             snapshot_buf: Vec::new(),
             trades_by_id: Vec::new(),
@@ -103,7 +103,7 @@ impl Broker {
         })
     }
 
-    // --- read-only views ---
+    // --- read-only views + take ---
     pub fn cash(&self) -> f64 {
         self.cash
     }
@@ -125,8 +125,21 @@ impl Broker {
             .map(|&id| &self.trades_by_id[id])
             .collect()
     }
+    pub fn take_closed_trades(&mut self) -> Vec<Trade> {
+        let closed_ids: std::collections::HashSet<usize> =
+            self.closed_trade_ids.iter().map(|id| id.0).collect();
+        let all = std::mem::take(&mut self.trades_by_id);
+        all.into_iter()
+            .enumerate()
+            .filter(|(i, _)| closed_ids.contains(i))
+            .map(|(_, t)| t)
+            .collect()
+    }
     pub fn equity_curve(&self) -> &[f64] {
         &self.equity_curve
+    }
+    pub fn take_equity_curve(&mut self) -> Vec<f64> {
+        std::mem::take(&mut self.equity_curve)
     }
     pub fn position(&self, data: &Data) -> Position {
         let last_price = self.last_price(data);
@@ -406,161 +419,163 @@ impl Broker {
     }
 
     fn process_orders(&mut self, data: &Data) -> BtResult<()> {
-        if self.order_queue.is_empty() {
-            return Ok(());
-        }
-        let open = data.at(Field::Open, -1);
-        let high = data.at(Field::High, -1);
-        let low = data.at(Field::Low, -1);
-        let mut reprocess_orders = false;
-
-        let mut snapshot = std::mem::take(&mut self.snapshot_buf);
-        snapshot.clear();
-        snapshot.extend_from_slice(&self.order_queue);
-
-        for &order_id in &snapshot {
-            // The related SL/TP sibiling order may have already been removed by a prior iteration
-            // of this same loop (e.g. hedged position)
-            if !self.orders_by_id.contains(order_id) {
-                continue;
+        loop {
+            if self.order_queue.is_empty() {
+                return Ok(());
             }
-            let mut order = self.orders_by_id[order_id].clone();
+            let open = data.at(Field::Open, -1);
+            let high = data.at(Field::High, -1);
+            let low = data.at(Field::Low, -1);
+            let mut reprocess_orders = false;
 
-            // -- stop trigger ? --
-            let stop_price = order.stop;
-            if let Some(sp) = stop_price {
-                let is_stop_hit = if order.is_long() {
-                    high >= sp
-                } else {
-                    low <= sp
-                };
-                if !is_stop_hit {
+            let mut snapshot = std::mem::take(&mut self.snapshot_buf);
+            snapshot.clear();
+            snapshot.extend_from_slice(&self.order_queue);
+
+            for &order_id in &snapshot {
+                // The related SL/TP sibiling order may have already been removed by a prior iteration
+                // of this same loop (e.g. hedged position)
+                if !self.orders_by_id.contains(order_id) {
                     continue;
                 }
-                // A triggered stop order becomes a market/limit order
-                order.stop = None;
-                self.orders_by_id.insert(order_id, order.clone());
-            }
-            let is_contingent = self.order_is_contingent(order_id);
+                let mut order = self.orders_by_id[order_id].clone();
 
-            // -- determine fill price --
-            let price: f64;
-            if let Some(limit) = order.limit {
-                let is_limit_hit = if order.is_long() {
-                    low <= limit
-                } else {
-                    high >= limit
-                };
-                let is_limit_hit_before_stop = is_limit_hit
-                    && if order.is_long() {
-                        limit <= stop_price.unwrap_or(f64::NEG_INFINITY)
-                    } else {
-                        limit >= stop_price.unwrap_or(f64::INFINITY)
-                    };
-                if !is_limit_hit || is_limit_hit_before_stop {
-                    continue;
-                }
-                price = if order.is_long() {
-                    stop_price.unwrap_or(open).min(limit)
-                } else {
-                    stop_price.unwrap_or(open).max(limit)
-                };
-            } else {
-                let prev_close = data.at(Field::Close, -2);
-                let mut p = if self.trade_on_close && !is_contingent && !prev_close.is_nan() {
-                    prev_close
-                } else {
-                    open
-                };
+                // -- stop trigger ? --
+                let stop_price = order.stop;
                 if let Some(sp) = stop_price {
-                    p = if order.is_long() {
-                        p.max(sp)
+                    let is_stop_hit = if order.is_long() {
+                        high >= sp
                     } else {
-                        p.min(sp)
-                    }
-                }
-                price = p;
-            }
-
-            let is_market_order = order.limit.is_none() && stop_price.is_none();
-            let time_index = if is_market_order && self.trade_on_close && !is_contingent {
-                self.current_bar.saturating_sub(1)
-            } else {
-                self.current_bar
-            };
-
-            // -- contingent order: closes/reduces on existing trade --
-            if let Some(trade_id) = order.parent_trade {
-                let prev_size = match self.trades_by_id.get(trade_id.0) {
-                    Some(t) => t.size,
-                    None => {
-                        self.remove_order(order_id);
+                        low <= sp
+                    };
+                    if !is_stop_hit {
                         continue;
                     }
-                };
-                let order_units = match order.size {
-                    OrderSize::Units(u) => u,
-                    OrderSize::Fraction(_) => {
-                        unreachable!("contingent (trade-closing) orders are always whole units")
+                    // A triggered stop order becomes a market/limit order
+                    order.stop = None;
+                    self.orders_by_id.insert(order_id, order.clone());
+                }
+                let is_contingent = self.order_is_contingent(order_id);
+
+                // -- determine fill price --
+                let price: f64;
+                if let Some(limit) = order.limit {
+                    let is_limit_hit = if order.is_long() {
+                        low <= limit
+                    } else {
+                        high >= limit
+                    };
+                    let is_limit_hit_before_stop = is_limit_hit
+                        && if order.is_long() {
+                            limit <= stop_price.unwrap_or(f64::NEG_INFINITY)
+                        } else {
+                            limit >= stop_price.unwrap_or(f64::INFINITY)
+                        };
+                    if !is_limit_hit || is_limit_hit_before_stop {
+                        continue;
                     }
+                    price = if order.is_long() {
+                        stop_price.unwrap_or(open).min(limit)
+                    } else {
+                        stop_price.unwrap_or(open).max(limit)
+                    };
+                } else {
+                    let prev_close = data.at(Field::Close, -2);
+                    let mut p = if self.trade_on_close && !is_contingent && !prev_close.is_nan() {
+                        prev_close
+                    } else {
+                        open
+                    };
+                    if let Some(sp) = stop_price {
+                        p = if order.is_long() {
+                            p.max(sp)
+                        } else {
+                            p.min(sp)
+                        }
+                    }
+                    price = p;
+                }
+
+                let is_market_order = order.limit.is_none() && stop_price.is_none();
+                let time_index = if is_market_order && self.trade_on_close && !is_contingent {
+                    self.current_bar.saturating_sub(1)
+                } else {
+                    self.current_bar
                 };
-                let mag = prev_size.unsigned_abs().min(order_units.unsigned_abs()) as i64;
-                let close_size = if order_units >= 0 { mag } else { -mag };
 
-                if self.active_trade_ids.contains(&trade_id) {
-                    self.reduce_trade(trade_id, price, close_size, time_index);
+                // -- contingent order: closes/reduces on existing trade --
+                if let Some(trade_id) = order.parent_trade {
+                    let prev_size = match self.trades_by_id.get(trade_id.0) {
+                        Some(t) => t.size,
+                        None => {
+                            self.remove_order(order_id);
+                            continue;
+                        }
+                    };
+                    let order_units = match order.size {
+                        OrderSize::Units(u) => u,
+                        OrderSize::Fraction(_) => {
+                            unreachable!("contingent (trade-closing) orders are always whole units")
+                        }
+                    };
+                    let mag = prev_size.unsigned_abs().min(order_units.unsigned_abs()) as i64;
+                    let close_size = if order_units >= 0 { mag } else { -mag };
 
-                    // Restore the SL order's stop price after a same-price
-                    // trigger, so the surviving (possibly resized) order
-                    // still behaves as a stop order on subsequent bars.
-                    if let Some(sp) = stop_price
-                        && price == sp
-                        && let Some(trade) = self.trades_by_id.get(trade_id.0)
-                        && let Some(sl_oid) = trade.sl_order
-                        && let Some(order) = self.orders_by_id.get_mut(sl_oid)
+                    if self.active_trade_ids.contains(&trade_id) {
+                        self.reduce_trade(trade_id, price, close_size, time_index);
+
+                        // Restore the SL order's stop price after a same-price
+                        // trigger, so the surviving (possibly resized) order
+                        // still behaves as a stop order on subsequent bars.
+                        if let Some(sp) = stop_price
+                            && price == sp
+                            && let Some(trade) = self.trades_by_id.get(trade_id.0)
+                            && let Some(sl_oid) = trade.sl_order
+                            && let Some(order) = self.orders_by_id.get_mut(sl_oid)
+                        {
+                            order.stop = Some(sp);
+                        }
+                    }
+
+                    let is_bracket = self
+                        .trades_by_id
+                        .get(trade_id.0)
+                        .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
+                        .unwrap_or(false);
+                    if !is_bracket {
+                        self.remove_order(order_id);
+                    }
+                    continue;
+                }
+
+                // -- standalone order: opens a new trade --
+                let opened = self.fill_standalone_order(&order, price, time_index, data)?;
+                if opened && (order.sl.is_some() || order.tp.is_some()) {
+                    let tp_same_bar_safe = stop_price.is_some()
+                        && order.limit.is_none()
+                        && order.tp.is_some()
+                        && (order.is_long()
+                            && order.tp.unwrap() <= high
+                            && order.sl.unwrap_or(f64::NEG_INFINITY) > high);
+
+                    if is_market_order || tp_same_bar_safe {
+                        reprocess_orders = true;
+                    } else if (low..=high).contains(&order.sl.unwrap_or(f64::NEG_INFINITY))
+                        || (low..=high).contains(&order.tp.unwrap_or(f64::NEG_INFINITY))
                     {
-                        order.stop = Some(sp);
+                        self.warnings.push("A contingent SL/TP order would execute in the same bar its parent stop/limit order was turned into a trade. Since we can't assert the precise intra-candle price movement, the affected SL/TP order will instead be executed on the next  (matching) price/bar, making the result (of this trade) somewhat dubious.".to_string()
+                        );
                     }
                 }
-
-                let is_bracket = self
-                    .trades_by_id
-                    .get(trade_id.0)
-                    .map(|t| t.sl_order == Some(order_id) || t.tp_order == Some(order_id))
-                    .unwrap_or(false);
-                if !is_bracket {
-                    self.remove_order(order_id);
-                }
-                continue;
+                self.remove_order(order_id);
             }
-
-            // -- standalone order: opens a new trade --
-            let opened = self.fill_standalone_order(&order, price, time_index, data)?;
-            if opened && (order.sl.is_some() || order.tp.is_some()) {
-                let tp_same_bar_safe = stop_price.is_some()
-                    && order.limit.is_none()
-                    && order.tp.is_some()
-                    && (order.is_long()
-                        && order.tp.unwrap() <= high
-                        && order.sl.unwrap_or(f64::NEG_INFINITY) > high);
-
-                if is_market_order || tp_same_bar_safe {
-                    reprocess_orders = true;
-                } else if (low..=high).contains(&order.sl.unwrap_or(f64::NEG_INFINITY))
-                    || (low..=high).contains(&order.tp.unwrap_or(f64::NEG_INFINITY))
-                {
-                    self.warnings.push("A contingent SL/TP order would execute in the same bar its parent stop/limit order was turned into a trade. Since we can't assert the precise intra-candle price movement, the affected SL/TP order will instead be executed on the next  (matching) price/bar, making the result (of this trade) somewhat dubious.".to_string()
-                    );
-                }
+            snapshot.clear();
+            self.snapshot_buf = snapshot;
+            if !reprocess_orders {
+                return Ok(());
             }
-            self.remove_order(order_id);
+            // otherwise loop again on the same bar instead of recursing
         }
-        snapshot.clear();
-        self.snapshot_buf = snapshot;
-        if reprocess_orders {
-            self.process_orders(data)?;
-        }
-        Ok(())
     }
 
     fn remove_order(&mut self, order_id: OrderId) {
