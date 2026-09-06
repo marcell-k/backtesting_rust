@@ -1,4 +1,5 @@
 use crate::trade::Trade;
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct Stats {
@@ -35,7 +36,6 @@ pub struct Stats {
 
     pub sqn: f64,
 }
-use std::fmt;
 
 impl fmt::Display for Stats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -108,6 +108,13 @@ impl RunningStats {
     }
 }
 
+fn geometric_mean_from_log_sum(log_sum: f64, n: usize, degenerate: bool) -> f64 {
+    if n == 0 || degenerate {
+        return 0.0;
+    }
+    (log_sum / n as f64).exp() - 1.0
+}
+
 pub fn compute_stats(
     equity_curve: &[f64],
     closed_trades: &[Trade],
@@ -121,13 +128,17 @@ pub fn compute_stats(
 
     let mut peak = f64::MIN;
     let mut max_drawdown = 0.0_f64;
-    let mut dd_sum = 0.0_f64;
-    let mut dd_count = 0usize;
     let mut dd_durations = Vec::new();
+    let mut dd_peaks = Vec::new();
     let mut cur_dd_len = 0usize;
+    let mut cur_dd_peak = 0.0_f64;
 
     let mut returns_stats = RunningStats::default();
-    let mut downside_stats = RunningStats::default();
+    returns_stats.push(0.0);
+
+    let mut log_ret_sum = 0.0_f64;
+    let mut geo_degenerate = false;
+    let mut downside_sq_sum = 0.0_f64;
 
     let mut prev_eq: Option<f64> = None;
 
@@ -139,12 +150,13 @@ pub fn compute_stats(
             max_drawdown = dd;
         }
         if dd > 0.0 {
-            dd_sum += dd;
-            dd_count += 1;
             cur_dd_len += 1;
+            cur_dd_peak = cur_dd_peak.max(dd);
         } else if cur_dd_len > 0 {
             dd_durations.push(cur_dd_len);
+            dd_peaks.push(cur_dd_peak);
             cur_dd_len = 0;
+            cur_dd_peak = 0.0;
         }
 
         // per-bar return tracking
@@ -153,20 +165,29 @@ pub fn compute_stats(
         {
             let r = eq / p - 1.0;
             returns_stats.push(r);
-            if r < 0.0 {
-                downside_stats.push(r);
+
+            let one_plus_r = 1.0 + r;
+            if one_plus_r > 0.0 && !geo_degenerate {
+                log_ret_sum += one_plus_r.ln();
+            } else {
+                geo_degenerate = true;
             }
+
+            let clipped = r.min(0.0);
+            downside_sq_sum += clipped * clipped;
         }
         prev_eq = Some(eq);
     }
     if cur_dd_len > 0 {
         dd_durations.push(cur_dd_len);
+        dd_peaks.push(cur_dd_peak);
     }
 
     let equity_peak = peak.max(equity_final);
     let max_drawdown_pct = max_drawdown * 100.0;
-    let avg_drawdown_pct = if dd_count > 0 {
-        dd_sum / dd_count as f64 * 100.0
+
+    let avg_drawdown_pct = if !dd_peaks.is_empty() {
+        dd_peaks.iter().sum::<f64>() / dd_peaks.len() as f64 * 100.0
     } else {
         0.0
     };
@@ -177,8 +198,10 @@ pub fn compute_stats(
         dd_durations.iter().sum::<usize>() as f64 / dd_durations.len() as f64
     };
 
-    let (mean_r, std_r) = returns_stats.mean_std();
-    let (_, std_downside) = downside_stats.mean_std();
+    let (_, std_r) = returns_stats.mean_std();
+    let var_r = std_r * std_r;
+    let n_returns = returns_stats.n; // == n_full, see comment above
+    let gmean = geometric_mean_from_log_sum(log_ret_sum, n_returns, geo_degenerate);
 
     let cash0 = equity_curve.first().copied().unwrap_or(equity_final);
     let return_pct = if cash0 != 0.0 {
@@ -187,7 +210,10 @@ pub fn compute_stats(
         0.0
     };
 
-    let bh_start = close.first().copied().unwrap_or(1.0);
+    let bh_start = close
+        .get(start_bar.saturating_sub(1))
+        .copied()
+        .unwrap_or(1.0);
     let bh_end = close.last().copied().unwrap_or(bh_start);
     let buy_and_hold_return_pct = if bh_start != 0.0 {
         (bh_end / bh_start - 1.0) * 100.0
@@ -195,32 +221,43 @@ pub fn compute_stats(
         0.0
     };
 
-    let years = if periods_per_year > 0.0 {
-        n_full.saturating_sub(start_bar) as f64 / periods_per_year
+    // Mirrors backtesting.py's `_compute_stats` for the case where each bar
+    // is one "period" (`periods_per_year` playing the role of
+    // `annual_trading_days`, i.e. no true calendar resampling to
+    // week/month/year). See README TODO re: datetime-index-aware stats.
+    let annualized_return = if periods_per_year > 0.0 {
+        (1.0 + gmean).powf(periods_per_year) - 1.0
     } else {
         0.0
     };
-    let return_ann_pct = if years > 0.0 && cash0 != 0.0 {
-        (((equity_final / cash0).powf(1.0 / years)) - 1.0) * 100.0
-    } else {
-        0.0
-    };
+    let return_ann_pct = annualized_return * 100.0;
+
     let volatility_ann_pct = if periods_per_year > 0.0 {
-        std_r * periods_per_year.sqrt() * 100.0
+        let base = var_r + (1.0 + gmean).powi(2);
+        let term = base.powf(periods_per_year) - (1.0 + gmean).powf(2.0 * periods_per_year);
+        term.max(0.0).sqrt() * 100.0
     } else {
         0.0
     };
 
-    let sharpe_ratio = if std_r > 0.0 && periods_per_year > 0.0 {
-        mean_r / std_r * periods_per_year.sqrt()
+    let sharpe_ratio = if volatility_ann_pct > 0.0 {
+        return_ann_pct / volatility_ann_pct
     } else {
         0.0
     };
-    let sortino_ratio = if std_downside > 0.0 && periods_per_year > 0.0 {
-        mean_r / std_downside * periods_per_year.sqrt()
+
+    let sortino_ratio = if periods_per_year > 0.0 && n_returns > 0 {
+        let downside_rms = (downside_sq_sum / n_returns as f64).sqrt();
+        let denom = downside_rms * periods_per_year.sqrt();
+        if denom > 0.0 {
+            annualized_return / denom
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
+
     let calmar_ratio = if max_drawdown_pct > 0.0 {
         return_ann_pct / max_drawdown_pct
     } else {
@@ -231,28 +268,31 @@ pub fn compute_stats(
     let num_trades = closed_trades.len();
     let last_price = close.last().copied().unwrap_or(0.0);
     let mut win_count = 0usize;
-    let mut sum_pct = 0.0_f64;
+    let mut sum_pct = 0.0_f64; // arithmetic sum of pl_pct * 100
     let mut best_trade_pct = f64::MIN;
     let mut worst_trade_pct = f64::MAX;
     let mut max_trade_duration_bars = 0usize;
     let mut sum_duration = 0usize;
-    let mut gross_profit = 0.0_f64;
-    let mut gross_loss = 0.0_f64;
+    let mut win_ret_frac_sum = 0.0_f64;
+    let mut loss_ret_frac_sum = 0.0_f64; // stored as a positive magnitude
+    let mut trade_log_sum = 0.0_f64;
+    let mut trade_geo_degenerate = false;
     let mut pl_stats = RunningStats::default();
 
     for t in closed_trades {
         let pl = t.pl(last_price);
-        let pct = t.pl_pct(last_price) * 100.0;
+        let r = t.pl_pct(last_price); // fraction
+        let pct = r * 100.0;
         let duration = t
             .exit_bar
             .unwrap_or(t.entry_bar)
             .saturating_sub(t.entry_bar);
 
-        if pl > 0.0 {
+        if r > 0.0 {
             win_count += 1;
-            gross_profit += pl;
-        } else if pl < 0.0 {
-            gross_loss -= pl;
+            win_ret_frac_sum += r;
+        } else if r < 0.0 {
+            loss_ret_frac_sum -= r;
         }
 
         sum_pct += pct;
@@ -262,6 +302,13 @@ pub fn compute_stats(
         max_trade_duration_bars = max_trade_duration_bars.max(duration);
         sum_duration += duration;
 
+        let one_plus_r = 1.0 + r;
+        if one_plus_r > 0.0 && !trade_geo_degenerate {
+            trade_log_sum += one_plus_r.ln();
+        } else {
+            trade_geo_degenerate = true;
+        }
+
         pl_stats.push(pl);
     }
 
@@ -270,22 +317,23 @@ pub fn compute_stats(
     } else {
         0.0
     };
-    let avg_trade_pct = if num_trades > 0 {
+    let expectancy_pct = if num_trades > 0 {
         sum_pct / num_trades as f64
     } else {
         0.0
     };
+    let avg_trade_pct =
+        geometric_mean_from_log_sum(trade_log_sum, num_trades, trade_geo_degenerate) * 100.0;
     let avg_trade_duration_bars = if num_trades > 0 {
         sum_duration as f64 / num_trades as f64
     } else {
         0.0
     };
-    let profit_factor = if gross_loss > 0.0 {
-        gross_profit / gross_loss
+    let profit_factor = if loss_ret_frac_sum > 0.0 {
+        win_ret_frac_sum / loss_ret_frac_sum
     } else {
-        f64::INFINITY
+        f64::NAN
     };
-    let expectancy_pct = avg_trade_pct;
     let (mean_pl, std_pl) = pl_stats.mean_std();
     let sqn = if std_pl > 0.0 && num_trades > 0 {
         mean_pl / std_pl * (num_trades as f64).sqrt()
@@ -293,21 +341,16 @@ pub fn compute_stats(
         0.0
     };
 
-    let window_len = end_bar.saturating_sub(start_bar) + 1;
-    let exposure_time_pct = if window_len > 0 {
-        let mut open_bars = vec![false; window_len];
+    let exposure_time_pct = if n_full > 0 {
+        let mut open_bars = vec![false; n_full];
         for t in closed_trades {
-            let entry = t.entry_bar.saturating_sub(start_bar).min(window_len - 1);
-            let exit = t
-                .exit_bar
-                .unwrap_or(end_bar)
-                .saturating_sub(start_bar)
-                .min(window_len - 1);
+            let entry = t.entry_bar.min(n_full - 1);
+            let exit = t.exit_bar.unwrap_or(end_bar).min(n_full - 1);
             for b in open_bars.iter_mut().take(exit + 1).skip(entry) {
                 *b = true;
             }
         }
-        open_bars.iter().filter(|&&b| b).count() as f64 / window_len as f64 * 100.0
+        open_bars.iter().filter(|&&b| b).count() as f64 / n_full as f64 * 100.0
     } else {
         0.0
     };

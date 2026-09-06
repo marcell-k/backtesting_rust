@@ -5,7 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 authors = [{ name = "Kele98-star", email = "kele.marcell.mail@gmail.com" }]
 requires-python = ">=3.14"
-dependencies = ["backtesting>=0.6.6", "pandas>=3.0.5"]
+dependencies = [
+    "backtesting",
+    "pandas>=3.0.5",
+]
 
 [project.scripts]
 tests = "tests:main"
@@ -16,3 +19,6 @@ build-backend = "uv_build"
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+backtesting = { git = "ssh://git@github.com/marcell-k/backtesting.git" }

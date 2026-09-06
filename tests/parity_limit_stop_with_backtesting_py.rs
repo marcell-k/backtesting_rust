@@ -4,9 +4,6 @@ use backtesting::{
 use chrono::NaiveDate;
 use std::io::Write;
 
-// NOTE: fill these in after running `uv run tests/ref_limit_stop.py`
-// (from inside `tests/`, so its relative `../data.csv` resolves) and
-// copying the printed JSON values below.
 const EXPECTED_NUM_TRADES: usize = 56371;
 const EXPECTED_EQUITY_FINAL: f64 = 160849995.5777802;
 const EXPECTED_RETURN_PCT: f64 = 15984.99955777802;
@@ -14,6 +11,19 @@ const EXPECTED_WIN_RATE_PCT: f64 = 39.73674407053272;
 const EXPECTED_BEST_TRADE_PCT: f64 = 5.069893596011739;
 const EXPECTED_WORST_TRADE_PCT: f64 = -4.11973973468397;
 const EXPECTED_TRADE_SIZE: i64 = -147144;
+const EXPECTED_BUY_AND_HOLD_RETURN_PCT: f64 = 10.538573018611851;
+const EXPECTED_RETURN_ANN_PCT: f64 = 0.12811001899444285;
+const EXPECTED_VOLATILITY_ANN_PCT: f64 = 0.5730784380794813;
+const EXPECTED_SHARPE_RATIO: f64 = 0.2235470931758822;
+const EXPECTED_SORTINO_RATIO: f64 = 0.3244290534599083;
+const EXPECTED_CALMAR_RATIO: f64 = 0.014559442484783774;
+const EXPECTED_MAX_DRAWDOWN_PCT: f64 = 8.799101966186685;
+const EXPECTED_AVG_DRAWDOWN_PCT: f64 = 0.3131180270381846;
+const EXPECTED_AVG_TRADE_PCT: f64 = 0.09972532943842705;
+const EXPECTED_PROFIT_FACTOR: f64 = 1.171503659311876;
+const EXPECTED_EXPECTANCY_PCT: f64 = 0.11215255614821282;
+const EXPECTED_SQN: f64 = 9.543698178574365;
+const EXPECTED_EXPOSURE_TIME_PCT: f64 = 19.7638;
 const EXPECTED_ENTRY_PRICE: f64 = 109.38797;
 const EXPECTED_EXIT_PRICE: f64 = 110.29915585;
 const EXPECTED_TAG: &str = "short_limit_entry";
@@ -207,6 +217,67 @@ fn sma_cross_limit_stop_matches_backtesting_py() {
         "worst_trade_pct",
         result.stats.worst_trade_pct,
         EXPECTED_WORST_TRADE_PCT,
+    );
+    assert_close(
+        "buy_and_hold_return_pct",
+        result.stats.buy_and_hold_return_pct,
+        EXPECTED_BUY_AND_HOLD_RETURN_PCT,
+    );
+    assert_close(
+        "return_ann_pct",
+        result.stats.return_ann_pct,
+        EXPECTED_RETURN_ANN_PCT,
+    );
+    assert_close(
+        "volatility_ann_pct",
+        result.stats.volatility_ann_pct,
+        EXPECTED_VOLATILITY_ANN_PCT,
+    );
+    assert_close(
+        "sharpe_ratio",
+        result.stats.sharpe_ratio,
+        EXPECTED_SHARPE_RATIO,
+    );
+    assert_close(
+        "sortino_ratio",
+        result.stats.sortino_ratio,
+        EXPECTED_SORTINO_RATIO,
+    );
+    assert_close(
+        "calmar_ratio",
+        result.stats.calmar_ratio,
+        EXPECTED_CALMAR_RATIO,
+    );
+    assert_close(
+        "max_drawdown_pct",
+        result.stats.max_drawdown_pct,
+        EXPECTED_MAX_DRAWDOWN_PCT,
+    );
+    assert_close(
+        "avg_drawdown_pct",
+        result.stats.avg_drawdown_pct,
+        EXPECTED_AVG_DRAWDOWN_PCT,
+    );
+    assert_close(
+        "avg_trade_pct",
+        result.stats.avg_trade_pct,
+        EXPECTED_AVG_TRADE_PCT,
+    );
+    assert_close(
+        "profit_factor",
+        result.stats.profit_factor,
+        EXPECTED_PROFIT_FACTOR,
+    );
+    assert_close(
+        "expectancy_pct",
+        result.stats.expectancy_pct,
+        EXPECTED_EXPECTANCY_PCT,
+    );
+    assert_close("sqn", result.stats.sqn, EXPECTED_SQN);
+    assert_close(
+        "exposure_time_pct",
+        result.stats.exposure_time_pct,
+        EXPECTED_EXPOSURE_TIME_PCT,
     );
 
     let t = result
