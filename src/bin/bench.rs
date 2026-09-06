@@ -1,7 +1,3 @@
-//! Usage:
-//!   cargo build --release --bin bench
-//!   hyperfine --warmup 3 --min-runs 20 './target/release/bench data.csv'
-
 use backtesting::{
     Backtest, BrokerConfig, Commission, Context, Data, Indicator, OrderSize, Strategy,
 };
@@ -98,6 +94,80 @@ impl Strategy for SmaCross {
     }
 }
 
+struct SmaCrossLimitStop {
+    fast_window: usize,
+    slow_window: usize,
+    sma_fast: usize,
+    sma_slow: usize,
+}
+
+impl SmaCrossLimitStop {
+    fn new(fast_window: usize, slow_window: usize) -> Self {
+        Self {
+            fast_window,
+            slow_window,
+            sma_fast: usize::MAX,
+            sma_slow: usize::MAX,
+        }
+    }
+}
+
+impl Strategy for SmaCrossLimitStop {
+    fn init(&mut self, ctx: &mut Context) {
+        let close = ctx.data.full_close();
+        self.sma_fast = ctx.indicator(Indicator::new(
+            format!("SMA({})", self.fast_window),
+            sma(close, self.fast_window),
+        ));
+        self.sma_slow = ctx.indicator(Indicator::new(
+            format!("SMA({})", self.slow_window),
+            sma(close, self.slow_window),
+        ));
+    }
+
+    fn next(&mut self, ctx: &mut Context) {
+        let fast = ctx.indicator_series(self.sma_fast);
+        let slow = ctx.indicator_series(self.sma_slow);
+        if fast.len() < 2 || slow.len() < 2 {
+            return;
+        }
+        let (fast_now, fast_prev) = (fast[fast.len() - 1], fast[fast.len() - 2]);
+        let (slow_now, slow_prev) = (slow[slow.len() - 1], slow[slow.len() - 2]);
+
+        if fast_prev.is_nan() || fast_now.is_nan() || slow_prev.is_nan() || slow_now.is_nan() {
+            return;
+        }
+
+        let crossed_up = fast_prev < slow_prev && fast_now > slow_now;
+        let crossed_down = fast_prev > slow_prev && fast_now < slow_now;
+
+        let price = *ctx.data.close().last().unwrap();
+        if crossed_up {
+            // breakout entry: buy STOP above current price
+            ctx.buy(
+                OrderSize::Fraction(0.0001),
+                None,
+                Some(price * 1.001),
+                Some(price * 0.99),
+                Some(price * 1.02),
+                Some("long_stop_entry".to_string()),
+            )
+            .unwrap();
+        } else if crossed_down {
+            // pullback entry: sell LIMIT above current price
+            ctx.sell(
+                OrderSize::Fraction(0.0001),
+                Some(price * 1.001),
+                None,
+                Some(price * 1.01),
+                Some(price * 0.98),
+                Some("short_limit_entry".to_string()),
+            )
+            .unwrap();
+        }
+    }
+}
+
 fn load_fixture() -> Data {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data.csv");
     let content = std::fs::read_to_string(path).expect("read data.csv");
@@ -140,13 +210,30 @@ fn main() {
     };
 
     let bt = Backtest::new(data, broker_config);
+
     for _ in 0..100 {
         let _ = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
     }
-
-    let result = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
+    let market_result = bt.run(SmaCross::new(10, 20)).expect("backtest run failed");
     println!(
-        "bars={n} trades={} equity_final={:.2} return_pct={:.2}",
-        result.stats.num_trades, result.stats.equity_final, result.stats.return_pct
+        "market  bars={n} trades={} equity_final={:.2} return_pct={:.2}",
+        market_result.stats.num_trades,
+        market_result.stats.equity_final,
+        market_result.stats.return_pct
+    );
+
+    for _ in 0..100 {
+        let _ = bt
+            .run(SmaCrossLimitStop::new(10, 20))
+            .expect("backtest run failed");
+    }
+    let limit_stop_result = bt
+        .run(SmaCrossLimitStop::new(10, 20))
+        .expect("backtest run failed");
+    println!(
+        "limit/stop  bars={n} trades={} equity_final={:.2} return_pct={:.2}",
+        limit_stop_result.stats.num_trades,
+        limit_stop_result.stats.equity_final,
+        limit_stop_result.stats.return_pct
     );
 }
