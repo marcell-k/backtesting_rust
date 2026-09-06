@@ -818,6 +818,115 @@ mod broker_fix_tests {
         )
         .unwrap()
     }
+    fn varying_data(prices: &[f64]) -> Data {
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let n = prices.len();
+        let index = (0..n)
+            .map(|i| start + chrono::Duration::days(i as i64))
+            .collect();
+        Data::new(
+            index,
+            prices.to_vec(),
+            prices.to_vec(),
+            prices.to_vec(),
+            prices.to_vec(),
+            vec![1000.0; n],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn canceled_order_never_fills() {
+        let mut data = flat_data(100.0, 4);
+        let config = BrokerConfig {
+            cash: 10_000.0,
+            margin: 1.0,
+            commission: Commission::relative(0.0),
+            ..Default::default()
+        };
+        let mut broker = Broker::new(config, 4).unwrap();
+        data.set_length(1);
+
+        let order_id = broker
+            .new_order(
+                &data,
+                OrderSize::Units(10),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        broker.cancel_order(order_id);
+
+        data.set_length(2);
+        broker.advance(&data, 1).unwrap();
+
+        assert!(
+            broker.trades().next().is_none(),
+            "a canceled order must not fill"
+        );
+        assert!(
+            broker.orders().next().is_none(),
+            "the canceled order should be gone from the queue"
+        );
+    }
+
+    #[test]
+    fn out_of_money_force_closes_trades_and_zeroes_remaining_equity() {
+        let mut data = varying_data(&[100.0, 100.0, 1.0]);
+        let config = BrokerConfig {
+            cash: 1_000.0,
+            margin: 0.01, // 100x leverage, so a big price move wipes the account
+            commission: Commission::relative(0.0),
+            ..Default::default()
+        };
+        let mut broker = Broker::new(config, 3).unwrap();
+
+        data.set_length(1);
+        broker
+            .new_order(
+                &data,
+                OrderSize::Fraction(0.99),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        data.set_length(2);
+        broker.advance(&data, 1).unwrap(); // fills near 100.0
+
+        data.set_length(3);
+        let result = broker.advance(&data, 2); // price craters to 1.0
+
+        assert!(
+            matches!(result, Err(BacktestError::OutOfMoney)),
+            "expected OutOfMoney, got {result:?}"
+        );
+        assert_eq!(
+            broker.cash(),
+            0.0,
+            "cash should be zeroed once the account is wiped out"
+        );
+        assert!(
+            broker.trades().next().is_none(),
+            "all trades should be force-closed when equity hits zero"
+        );
+        assert_eq!(
+            broker.equity_curve()[2],
+            0.0,
+            "equity from the out-of-money bar onward should be zeroed"
+        );
+    }
 
     #[test]
     fn canceled_order_without_tp_does_not_open_a_trade() {

@@ -1,4 +1,6 @@
-use backtesting::{Backtest, BrokerConfig, Commission, Context, Data, OrderSize, Strategy};
+use backtesting::{
+    Backtest, BrokerConfig, Commission, Context, Data, OrderSize, Strategy, TradeId,
+};
 use chrono::NaiveDate;
 use std::sync::Arc;
 
@@ -380,5 +382,330 @@ fn tag_survives_partial_close_and_shares_allocation() {
     assert!(
         Arc::ptr_eq(a, b),
         "tag should be shared via Arc, not re-allocated per trade"
+    );
+}
+
+#[test]
+fn hedging_keeps_long_and_short_trades_independent() {
+    struct BuyThenSellHedged {
+        bought: bool,
+        sold: bool,
+    }
+    impl Strategy for BuyThenSellHedged {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == 1 {
+                ctx.buy(OrderSize::Units(5.0), None, None, None, None, None)
+                    .unwrap();
+                self.bought = true;
+            } else if self.bought && !self.sold && ctx.bar_index() == 3 {
+                ctx.sell(OrderSize::Units(3.0), None, None, None, None, None)
+                    .unwrap();
+                self.sold = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),  // buy here
+        (101.0, 102.0, 100.0, 102.0), // long fills at this bar's open (101.0)
+        (102.0, 103.0, 101.0, 103.0), // sell here
+        (103.0, 104.0, 102.0, 104.0), // short fills at this bar's open (103.0)
+        (104.0, 105.0, 103.0, 105.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            commission: Commission::relative(0.0),
+            trade_on_close: false,
+            hedging: true,
+            ..Default::default()
+        },
+    );
+    let strat = BuyThenSellHedged {
+        bought: false,
+        sold: false,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(
+        result.closed_trades.len(),
+        2,
+        "hedging should open a separate trade instead of reducing the existing one"
+    );
+    let long_trade = result
+        .closed_trades
+        .iter()
+        .find(|t| t.is_long())
+        .expect("expected a long trade");
+    let short_trade = result
+        .closed_trades
+        .iter()
+        .find(|t| t.is_short())
+        .expect("expected a short trade");
+
+    assert_eq!(long_trade.size, 5);
+    assert_eq!(long_trade.entry_bar, 2);
+    assert!((long_trade.entry_price - 101.0).abs() < 1e-9);
+
+    assert_eq!(short_trade.size, -3);
+    assert_eq!(
+        short_trade.entry_bar, 4,
+        "a hedged short must be its own entry, not a split of the long trade"
+    );
+    assert!(
+        (short_trade.entry_price - 103.0).abs() < 1e-9,
+        "a hedged short's entry price must come from its own fill, not the long trade's"
+    );
+}
+
+#[test]
+fn exclusive_orders_auto_closes_before_opening_a_new_trade() {
+    struct BuyTwice {
+        bought_first: bool,
+        bought_second: bool,
+    }
+    impl Strategy for BuyTwice {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought_first && ctx.bar_index() == 1 {
+                ctx.buy(OrderSize::Units(5.0), None, None, None, None, None)
+                    .unwrap();
+                self.bought_first = true;
+            } else if self.bought_first && !self.bought_second && ctx.bar_index() == 4 {
+                // No explicit close first -- exclusive_orders should auto-close
+                // the existing position before opening this one.
+                ctx.buy(OrderSize::Units(5.0), None, None, None, None, None)
+                    .unwrap();
+                self.bought_second = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),  // buy #1 here
+        (101.0, 102.0, 100.0, 102.0), // entry #1 fills
+        (102.0, 103.0, 101.0, 103.0),
+        (103.0, 104.0, 102.0, 104.0), // buy #2 here -> auto-closes #1
+        (104.0, 105.0, 103.0, 105.0), // auto-close #1 + entry #2 fill here
+        (105.0, 106.0, 104.0, 106.0),
+        (106.0, 107.0, 105.0, 107.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            commission: Commission::relative(0.0),
+            trade_on_close: false,
+            exclusive_orders: true,
+            ..Default::default()
+        },
+    );
+    let strat = BuyTwice {
+        bought_first: false,
+        bought_second: false,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(result.closed_trades.len(), 2);
+    let first = &result.closed_trades[0];
+    let second = &result.closed_trades[1];
+
+    assert_eq!(first.entry_bar, 2);
+    assert_eq!(
+        first.exit_bar,
+        Some(5),
+        "the first trade should be force-closed when the second order is placed"
+    );
+    assert_eq!(
+        second.entry_bar, 5,
+        "the new trade should open the same bar the old one was auto-closed"
+    );
+    assert!(
+        second.exit_bar.unwrap() > 5,
+        "the second trade should only close via finalize, not immediately again"
+    );
+}
+
+#[test]
+fn sl_replaced_twice_uses_the_latest_price() {
+    struct BuyThenTightenSlTwice {
+        bought: bool,
+        tightened_once: bool,
+        tightened_twice: bool,
+        trade_id: Option<TradeId>,
+    }
+    impl Strategy for BuyThenTightenSlTwice {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == 2 {
+                ctx.buy(
+                    OrderSize::Units(1.0),
+                    None,
+                    None,
+                    Some(90.0),
+                    Some(120.0),
+                    None,
+                )
+                .unwrap();
+                self.bought = true;
+            } else if self.bought && !self.tightened_once && ctx.bar_index() == 4 {
+                self.trade_id = Some(ctx.trades()[0].id);
+                ctx.set_trade_sl(self.trade_id.unwrap(), Some(95.0))
+                    .unwrap();
+                self.tightened_once = true;
+            } else if self.tightened_once && !self.tightened_twice && ctx.bar_index() == 5 {
+                ctx.set_trade_sl(self.trade_id.unwrap(), Some(98.0))
+                    .unwrap();
+                self.tightened_twice = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),
+        (101.0, 102.0, 100.0, 102.0), // buy here, sl=90, tp=120
+        (102.0, 103.0, 101.0, 103.0), // entry fills at open=102
+        (103.0, 104.0, 102.0, 104.0), // tighten sl -> 95 here
+        (104.0, 105.0, 103.0, 105.0), // tighten sl -> 98 here
+        (105.0, 106.0, 96.0, 97.0),   // Low breaches 98, not 90 or 95
+        (97.0, 98.0, 96.0, 97.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            commission: Commission::relative(0.0),
+            trade_on_close: false,
+            ..Default::default()
+        },
+    );
+    let strat = BuyThenTightenSlTwice {
+        bought: false,
+        tightened_once: false,
+        tightened_twice: false,
+        trade_id: None,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(result.closed_trades.len(), 1);
+    let t = &result.closed_trades[0];
+    assert_eq!(t.exit_bar, Some(6));
+    assert!(
+        (t.exit_price.unwrap() - 98.0).abs() < 1e-9,
+        "should exit at the most recently set SL (98), not an earlier one, got {:?}",
+        t.exit_price
+    );
+}
+
+#[test]
+fn tp_replaced_twice_uses_the_latest_price() {
+    struct BuyThenTightenTpTwice {
+        bought: bool,
+        tightened_once: bool,
+        tightened_twice: bool,
+        trade_id: Option<TradeId>,
+    }
+    impl Strategy for BuyThenTightenTpTwice {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == 2 {
+                ctx.buy(OrderSize::Units(1.0), None, None, None, Some(120.0), None)
+                    .unwrap();
+                self.bought = true;
+            } else if self.bought && !self.tightened_once && ctx.bar_index() == 4 {
+                self.trade_id = Some(ctx.trades()[0].id);
+                ctx.set_trade_tp(self.trade_id.unwrap(), Some(110.0))
+                    .unwrap();
+                self.tightened_once = true;
+            } else if self.tightened_once && !self.tightened_twice && ctx.bar_index() == 5 {
+                ctx.set_trade_tp(self.trade_id.unwrap(), Some(108.0))
+                    .unwrap();
+                self.tightened_twice = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),
+        (101.0, 102.0, 100.0, 102.0), // buy here, tp=120
+        (102.0, 103.0, 101.0, 103.0), // entry fills at open=102
+        (103.0, 104.0, 102.0, 104.0), // tighten tp -> 110 here
+        (104.0, 105.0, 103.0, 105.0), // tighten tp -> 108 here
+        (105.0, 109.0, 104.0, 108.0), // High touches 108, not 110 or 120
+        (108.0, 109.0, 107.0, 108.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            commission: Commission::relative(0.0),
+            trade_on_close: false,
+            ..Default::default()
+        },
+    );
+    let strat = BuyThenTightenTpTwice {
+        bought: false,
+        tightened_once: false,
+        tightened_twice: false,
+        trade_id: None,
+    };
+    let result = bt.run(strat).unwrap();
+
+    assert_eq!(result.closed_trades.len(), 1);
+    let t = &result.closed_trades[0];
+    assert_eq!(t.exit_bar, Some(6));
+    assert!(
+        (t.exit_price.unwrap() - 108.0).abs() < 1e-9,
+        "should exit at the most recently set TP (108), not an earlier one, got {:?}",
+        t.exit_price
+    );
+}
+
+#[test]
+fn custom_commission_charges_the_flat_fee_on_both_legs() {
+    struct BuyOnceFlat {
+        bought: bool,
+    }
+    impl Strategy for BuyOnceFlat {
+        fn init(&mut self, _ctx: &mut Context) {}
+        fn next(&mut self, ctx: &mut Context) {
+            if !self.bought && ctx.bar_index() == 1 {
+                ctx.buy(OrderSize::Units(10.0), None, None, None, None, None)
+                    .unwrap();
+                self.bought = true;
+            }
+        }
+    }
+
+    let data = bars(&[
+        (100.0, 101.0, 99.0, 100.0),
+        (100.0, 101.0, 99.0, 101.0),
+        (101.0, 102.0, 100.0, 102.0),
+        (102.0, 103.0, 101.0, 103.0),
+        (103.0, 104.0, 102.0, 104.0),
+    ]);
+    let bt = Backtest::new(
+        data,
+        BrokerConfig {
+            cash: 10_000.0,
+            commission: Commission::custom(|_order_size, _price| 5.0),
+            trade_on_close: false,
+            ..Default::default()
+        },
+    );
+    let result = bt.run(BuyOnceFlat { bought: false }).unwrap();
+
+    assert_eq!(result.closed_trades.len(), 1);
+    let t = &result.closed_trades[0];
+    assert!(
+        (t.commission - 10.0).abs() < 1e-9,
+        "flat $5 fee should be charged on both entry and exit legs, got {}",
+        t.commission
     );
 }
