@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::{
     commission::Commission,
@@ -46,7 +46,7 @@ pub struct Broker {
     orders_by_id: OrderTable,
     /// Prcossening orders for pending orders. SL orders are inserted at the front so they're
     /// matched before other queued orders within the same bar.
-    order_queue: Vec<OrderId>,
+    order_queue: VecDeque<OrderId>,
     /// Scratch buffer reused every bar for the process_orders() snapshot,
     /// so we don't heap-allocate a fresh Vec on every single bar.
     snapshot_buf: Vec<OrderId>,
@@ -90,9 +90,9 @@ impl Broker {
             hedging: config.hedging,
             exclusive_orders: config.exclusive_orders,
             orders_by_id: OrderTable::with_capacity(n_bars * 2),
-            order_queue: Vec::with_capacity(16),
+            order_queue: VecDeque::with_capacity(16),
             snapshot_buf: Vec::with_capacity(16),
-            trades_by_id: Vec::with_capacity(16),
+            trades_by_id: Vec::with_capacity(n_bars / 2),
             active_trade_ids: Vec::with_capacity(16),
             closed_trade_ids: Vec::with_capacity(16),
             equity_curve: vec![f64::NAN; n_bars],
@@ -123,15 +123,17 @@ impl Broker {
             .map(move |&id| &self.trades_by_id[id])
     }
     pub fn take_closed_trades(&mut self) -> Vec<Trade> {
-        let all = std::mem::take(&mut self.trades_by_id);
-        let mut is_closed = vec![false; all.len()];
+        let mut all: Vec<Option<Trade>> = std::mem::take(&mut self.trades_by_id)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut out = Vec::with_capacity(self.closed_trade_ids.len());
         for id in &self.closed_trade_ids {
-            is_closed[id.0] = true;
+            if let Some(t) = all[id.0].take() {
+                out.push(t);
+            }
         }
-        all.into_iter()
-            .zip(is_closed)
-            .filter_map(|(t, closed)| closed.then_some(t))
-            .collect()
+        out
     }
     pub fn equity_curve(&self) -> &[f64] {
         &self.equity_curve
@@ -249,7 +251,7 @@ impl Broker {
         let is_sl_order = trade.is_some() && stop.is_some();
         if is_sl_order {
             self.orders_by_id.insert(id, order);
-            self.order_queue.insert(0, id);
+            self.order_queue.push_front(id);
         } else {
             self.enqueue_order(order);
         }
@@ -271,7 +273,7 @@ impl Broker {
     fn enqueue_order(&mut self, order: Order) -> OrderId {
         let id = order.id;
         self.orders_by_id.insert(id, order);
-        self.order_queue.push(id);
+        self.order_queue.push_back(id);
         id
     }
 
@@ -427,7 +429,7 @@ impl Broker {
 
             let mut snapshot = std::mem::take(&mut self.snapshot_buf);
             snapshot.clear();
-            snapshot.extend_from_slice(&self.order_queue);
+            snapshot.extend(self.order_queue.iter().copied());
 
             for &order_id in &snapshot {
                 // The related SL/TP sibiling order may have already been removed by a prior iteration
@@ -450,19 +452,12 @@ impl Broker {
                     // A triggered stop order becomes a market/limit order
                     self.orders_by_id.get_mut(order_id).unwrap().stop = None;
                 }
-                let order = self.orders_by_id[order_id].clone();
-                let is_contingent = self.order_is_contingent(order_id);
-
-                // -- determine fill price --
-                let price: f64;
-                if let Some(limit) = order.limit {
-                    let is_limit_hit = if order.is_long() {
-                        low <= limit
-                    } else {
-                        high >= limit
-                    };
+                let is_long = self.orders_by_id[order_id].is_long();
+                let limit_price = self.orders_by_id[order_id].limit;
+                if let Some(limit) = limit_price {
+                    let is_limit_hit = if is_long { low <= limit } else { high >= limit };
                     let is_limit_hit_before_stop = is_limit_hit
-                        && if order.is_long() {
+                        && if is_long {
                             limit <= stop_price.unwrap_or(f64::NEG_INFINITY)
                         } else {
                             limit >= stop_price.unwrap_or(f64::INFINITY)
@@ -470,6 +465,14 @@ impl Broker {
                     if !is_limit_hit || is_limit_hit_before_stop {
                         continue;
                     }
+                }
+
+                let order = self.orders_by_id[order_id].clone();
+                let is_contingent = self.order_is_contingent(order_id);
+
+                // -- determine fill price --
+                let price: f64;
+                if let Some(limit) = order.limit {
                     price = if order.is_long() {
                         stop_price.unwrap_or(open).min(limit)
                     } else {
