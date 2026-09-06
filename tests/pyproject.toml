@@ -6,8 +6,11 @@ readme = "README.md"
 authors = [{ name = "Kele98-star", email = "kele.marcell.mail@gmail.com" }]
 requires-python = ">=3.14"
 dependencies = [
-    "backtesting",
-    "pandas>=3.0.5",
+  "backtesting",
+  "basedpyright>=1.39.10",
+  "pandas>=3.0.5",
+  "pandas-stubs>=3.0.5.260730",
+  "ruff>=0.16.6",
 ]
 
 [project.scripts]

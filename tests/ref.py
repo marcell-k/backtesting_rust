@@ -27,13 +27,13 @@ class SmaCross(Strategy):
 
     def next(self):
         price = self.data.Close[-1]
-        if crossover(self.sma_fast, self.sma_slow):
+        if crossover(self.sma_fast, self.sma_slow):  # pyright: ignore[reportArgumentType]
             self.buy(
                 size=0.0001,
                 sl=price * 0.99,  # 1% Stop Loss below entry
                 tp=price * 1.01,  # 1% Take Profit above entry
             )
-        elif crossover(self.sma_slow, self.sma_fast):
+        elif crossover(self.sma_slow, self.sma_fast):  # pyright: ignore[reportArgumentType]
             self.sell(
                 size=0.0001,
                 sl=price * 1.01,  # 1% Stop Loss above entry
