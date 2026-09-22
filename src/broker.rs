@@ -193,11 +193,7 @@ impl Broker {
         tag: Option<Arc<str>>,
         trade: Option<TradeId>,
     ) -> BtResult<OrderId> {
-        let is_zero = match size {
-            OrderSize::Fraction(f) => f == 0.0,
-            OrderSize::Units(u) => u == 0,
-        };
-        if is_zero {
+        if size.is_zero() {
             return Err(BacktestError::InvalidOrder("size must be nonzero".into()));
         }
         let is_long = size.is_long();

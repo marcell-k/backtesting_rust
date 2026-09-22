@@ -54,6 +54,13 @@ impl OrderSize {
             OrderSize::Units(u) => *u as f64,
         }
     }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        match *self {
+            Self::Fraction(f) => f == 0.0,
+            Self::Units(u) => u == 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
